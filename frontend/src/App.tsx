@@ -12,6 +12,7 @@ import KpiCards from './components/KpiCards';
 import FilterBar from './components/FilterBar';
 import LogTable from './components/LogTable';
 import StatsPanel from './components/StatsPanel';
+import ChatPanel from './components/ChatPanel';
 
 export default function App() {
   const [parseResult, setParseResult] = useState<ParseResult | null>(null);
@@ -112,6 +113,11 @@ export default function App() {
             <div className="right-panel">
               <StatsPanel entries={parseResult.entries} />
             </div>
+          </div>
+
+          {/* Agent 对话窗口（全宽） */}
+          <div className="chat-section">
+            <ChatPanel parseResult={parseResult} />
           </div>
         </>
       )}

@@ -2,7 +2,7 @@
  * API 客户端 —— 封装对后端的 fetch 调用
  */
 
-import type { ParseResult } from '../types/log';
+import type { ParseResult, ChatRequest, ChatResponse } from '../types/log';
 
 const API_BASE = '/api';
 
@@ -42,4 +42,22 @@ export async function checkHealth(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * 发送消息到 Agent 对话接口
+ */
+export async function sendChatMessage(req: ChatRequest): Promise<ChatResponse> {
+  const response = await fetch(`${API_BASE}/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    throw new Error(errorData?.detail || `服务器错误: ${response.status}`);
+  }
+
+  return response.json();
 }

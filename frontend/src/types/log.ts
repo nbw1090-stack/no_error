@@ -43,3 +43,28 @@ export interface FilterState {
   level: string;
   search: string;
 }
+
+/** 聊天消息 */
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+}
+
+/** 聊天请求 */
+export interface ChatRequest {
+  message: string;
+  history: { role: string; content: string }[];
+  context?: {
+    totalLines: number;
+    errorCount: number;
+    warningCount: number;
+    components: string[];
+  };
+}
+
+/** 聊天响应 */
+export interface ChatResponse {
+  reply: string;
+}
