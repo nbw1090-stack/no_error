@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+*.egg-info/
+dist/
+*.egg
+
+# Node
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# 日志相关文件/文件夹（不提交）
+dump_info.tar.gz
+dump_info/
+
+# 上传临时目录
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# IDE & OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# 环境变量
+.env
+.env.local
+.env.*.local

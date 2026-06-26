@@ -1,0 +1,101 @@
+/* FilterBar 组件样式 */
+
+.filter-bar {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 16px 20px;
+  background: var(--bg-card);
+  border-radius: 16px;
+  border: 1px solid var(--border-subtle);
+  margin-bottom: 24px;
+}
+
+/* 下拉选择器 */
+.filter-select {
+  background: #2C2C2E;
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  min-width: 160px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.filter-select:focus {
+  border-color: var(--accent-data);
+}
+
+.filter-select option {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+/* 级别按钮组 */
+.level-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.level-btn {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--font-body);
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.level-btn:hover {
+  border-color: var(--text-secondary);
+  color: var(--text-primary);
+}
+
+.level-btn.active {
+  background: var(--accent-data);
+  color: #121212;
+  border-color: var(--accent-data);
+  font-weight: 600;
+}
+
+/* 搜索输入框 */
+.filter-search {
+  background: #2C2C2E;
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  min-width: 200px;
+  flex: 1;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.filter-search::placeholder {
+  color: var(--text-secondary);
+}
+
+.filter-search:focus {
+  border-color: var(--accent-data);
+}
+
+/* 响应式 */
+@media (max-width: 600px) {
+  .filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .filter-search {
+    min-width: 0;
+  }
+}

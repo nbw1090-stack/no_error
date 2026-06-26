@@ -1,0 +1,58 @@
+/* UploadZone 组件样式 */
+
+.upload-zone {
+  border: 2px dashed var(--border-subtle);
+  border-radius: 16px;
+  padding: 48px 24px;
+  text-align: center;
+  cursor: pointer;
+  background: var(--bg-card);
+  transition: all 0.3s ease;
+  margin-bottom: 24px;
+}
+
+.upload-zone:hover {
+  border-color: var(--text-secondary);
+}
+
+.upload-zone.dragover {
+  border-color: var(--accent-data);
+  background: rgba(0, 229, 255, 0.05);
+}
+
+.upload-zone.loading {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.upload-zone.has-error {
+  border-color: var(--accent-alert);
+}
+
+.upload-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+.upload-text {
+  color: var(--text-secondary);
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.upload-hint {
+  color: var(--text-secondary);
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.error-message {
+  color: var(--accent-alert);
+  margin-top: 16px;
+  padding: 12px 16px;
+  background: var(--alert-bg);
+  border-radius: 8px;
+  border-left: 4px solid var(--accent-alert);
+  text-align: left;
+  font-size: 13px;
+}

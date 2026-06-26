@@ -1,0 +1,148 @@
+/* ================================================================
+ * App.css —— 全局样式 & CSS 变量（WattVision DESIGN.md 深色主题）
+ * ================================================================ */
+
+/* Google Fonts */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap');
+
+/* ================================================================
+ * CSS 自定义属性（设计规范配色）
+ * ================================================================ */
+:root {
+  --bg-primary: #121212;
+  --bg-card: #1E1E1E;
+  --accent-data: #00E5FF;
+  --accent-alert: #FF453A;
+  --accent-ok: #32D74B;
+  --accent-warning: #FF9F0A;
+  --accent-launch: #5E5CE6;
+  --text-primary: #FFFFFF;
+  --text-secondary: #98989D;
+  --border-subtle: #2C2C2E;
+  --alert-bg: #3A1C1C;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --font-body: 'Inter', -apple-system, sans-serif;
+}
+
+/* ================================================================
+ * 全局重置
+ * ================================================================ */
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ================================================================
+ * App 容器
+ * ================================================================ */
+.app {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+/* ================================================================
+ * 页面头部
+ * ================================================================ */
+.app-header {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.app-header h1 {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 24px;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.app-header .status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.app-header .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.app-header .status-dot.online {
+  background: var(--accent-ok);
+  box-shadow: 0 0 6px var(--accent-ok);
+}
+
+.app-header .status-dot.offline {
+  background: var(--accent-alert);
+  box-shadow: 0 0 6px var(--accent-alert);
+}
+
+/* ================================================================
+ * 主内容区（FilterBar + StatsPanel 左右布局）
+ * ================================================================ */
+.main-content {
+  display: flex;
+  gap: 24px;
+  margin-top: 24px;
+  align-items: flex-start;
+}
+
+.main-content .left-panel {
+  flex: 1;
+  min-width: 0;
+}
+
+.main-content .right-panel {
+  width: 380px;
+  flex-shrink: 0;
+}
+
+/* ================================================================
+ * 通用旋转加载动画
+ * ================================================================ */
+.spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--border-subtle);
+  border-top-color: var(--accent-data);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 0 auto;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ================================================================
+ * 响应式适配
+ * ================================================================ */
+@media (max-width: 900px) {
+  .main-content {
+    flex-direction: column;
+  }
+
+  .main-content .right-panel {
+    width: 100%;
+  }
+}

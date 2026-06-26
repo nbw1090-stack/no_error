@@ -1,0 +1,88 @@
+/* KpiCards 组件样式 */
+
+.kpi-section {
+  margin-bottom: 24px;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 16px;
+}
+
+.kpi-card {
+  border-radius: 16px;
+  padding: 20px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+}
+
+.kpi-card .kpi-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.kpi-card .kpi-value {
+  font-family: var(--font-mono);
+  font-size: 32px;
+  font-weight: 700;
+}
+
+.kpi-card.total .kpi-value {
+  color: var(--accent-data);
+}
+
+.kpi-card.errors .kpi-value {
+  color: var(--accent-alert);
+}
+
+.kpi-card.warnings .kpi-value {
+  color: var(--accent-warning);
+}
+
+.kpi-card.notices .kpi-value {
+  color: var(--accent-ok);
+}
+
+.kpi-card.launches .kpi-value {
+  color: var(--accent-launch);
+}
+
+/* 时间范围 */
+.time-range {
+  margin-top: 16px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  background: var(--bg-card);
+  padding: 12px 20px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.time-range-label {
+  color: var(--text-secondary);
+  font-family: var(--font-body);
+  margin-right: 4px;
+}
+
+.time-range-value {
+  color: var(--text-primary);
+}
+
+/* 响应式：小屏幕改为 2 列或 3 列 */
+@media (max-width: 1000px) {
+  .kpi-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .kpi-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

@@ -1,0 +1,9 @@
+/* 基础重置 */
+html, body {
+  height: 100%;
+  scroll-behavior: smooth;
+}
+
+#root {
+  min-height: 100%;
+}
