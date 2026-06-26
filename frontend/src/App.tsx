@@ -1,11 +1,16 @@
 /**
  * App 根组件
- * 组合 UploadZone、KpiCards、FilterBar、LogTable、StatsPanel
- * 管理全局状态：解析结果、筛选条件、加载/错误状态
+ *
+ * 管理全局状态：解析结果、筛选条件、会话生命周期、加载/错误状态
+ *
+ * 会话生命周期：
+ * 1. 上传解析成功后自动创建会话（sessionId 存入 state + localStorage）
+ * 2. 页面加载时尝试从 localStorage 恢复会话
+ * 3. 恢复失败（404）则清除旧 sessionId，等待用户重新上传
  */
 
 import { useState, useEffect, useMemo } from 'react';
-import { checkHealth } from './api/client';
+import { checkHealth, createSession, getSession } from './api/client';
 import type { ParseResult, FilterState } from './types/log';
 import UploadZone from './components/UploadZone';
 import KpiCards from './components/KpiCards';
@@ -14,26 +19,64 @@ import LogTable from './components/LogTable';
 import StatsPanel from './components/StatsPanel';
 import ChatPanel from './components/ChatPanel';
 
+const SESSION_STORAGE_KEY = 'bmc_session_id';
+
 export default function App() {
   const [parseResult, setParseResult] = useState<ParseResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
+  const [llmAvailable, setLlmAvailable] = useState<boolean>(false);
   const [filters, setFilters] = useState<FilterState>({
     component: '',
     level: 'ALL',
     search: '',
   });
 
-  /** 页面加载时检查后端健康状态 */
+  // 会话状态
+  const [sessionId, setSessionId] = useState<string>('');
+  const [sessionRestored, setSessionRestored] = useState(false);
+
+  /** 页面加载时：检查后端 + 恢复会话 */
   useEffect(() => {
-    checkHealth().then(setBackendOnline);
+    async function init() {
+      // 检查后端健康状态
+      const health = await checkHealth();
+      setBackendOnline(health.status === 'ok');
+      setLlmAvailable(health.llm_available ?? false);
+
+      // 尝试从 localStorage 恢复会话
+      const savedSessionId = localStorage.getItem(SESSION_STORAGE_KEY);
+      if (savedSessionId) {
+        try {
+          await getSession(savedSessionId);
+          setSessionId(savedSessionId);
+        } catch {
+          // 会话已过期或删除，清除
+          localStorage.removeItem(SESSION_STORAGE_KEY);
+        }
+      }
+      setSessionRestored(true);
+    }
+
+    init();
   }, []);
 
-  /** 上传成功回调 */
-  function handleParseResult(result: ParseResult) {
+  /** 上传成功回调：解析完成后自动创建会话 */
+  async function handleParseResult(result: ParseResult) {
     setParseResult(result);
     setError(null);
     setFilters({ component: '', level: 'ALL', search: '' });
+
+    // 创建新会话
+    if (result.dataset_id) {
+      try {
+        const session = await createSession(result.dataset_id);
+        setSessionId(session.session_id);
+        localStorage.setItem(SESSION_STORAGE_KEY, session.session_id);
+      } catch (e) {
+        console.error('Failed to create session:', e);
+      }
+    }
   }
 
   /** 错误回调 */
@@ -47,24 +90,18 @@ export default function App() {
     if (!parseResult?.entries) return [];
 
     return parseResult.entries.filter((entry) => {
-      // 组件筛选
       if (filters.component && entry.component !== filters.component) {
         return false;
       }
-
-      // 级别筛选
       if (filters.level !== 'ALL' && entry.level !== filters.level) {
         return false;
       }
-
-      // 搜索筛选（不区分大小写）
       if (filters.search) {
         const keyword = filters.search.toLowerCase();
         if (!entry.message.toLowerCase().includes(keyword)) {
           return false;
         }
       }
-
       return true;
     });
   }, [parseResult, filters]);
@@ -75,14 +112,19 @@ export default function App() {
       <header className="app-header">
         <h1>BMC 日志分析系统</h1>
         <div className="status-indicator">
-          <span className={`status-dot ${backendOnline ? 'online' : 'offline'}`} />
+          <span className={`status-dot ${backendOnline ? 'online' : backendOnline === false ? 'offline' : ''}`} />
           <span>
             {backendOnline === null
               ? '检查中...'
               : backendOnline
-                ? '后端服务已连接'
-                : '后端服务未连接'}
+                ? `后端已连接${llmAvailable ? ' · LLM 已就绪' : ' · 规则匹配模式'}`
+                : '后端未连接'}
           </span>
+          {sessionId && (
+            <span className="session-badge" title={sessionId}>
+              会话: {sessionId.slice(0, 8)}...
+            </span>
+          )}
         </div>
       </header>
 
@@ -115,10 +157,12 @@ export default function App() {
             </div>
           </div>
 
-          {/* Agent 对话窗口（全宽） */}
-          <div className="chat-section">
-            <ChatPanel parseResult={parseResult} />
-          </div>
+          {/* Agent 对话窗口 */}
+          {sessionId && sessionRestored && (
+            <div className="chat-section">
+              <ChatPanel sessionId={sessionId} />
+            </div>
+          )}
         </>
       )}
     </div>

@@ -331,6 +331,36 @@
   line-height: 1;
 }
 
+/* ---- 停止按钮 ---- */
+.chat-input-area .chat-stop-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  border: none;
+  background: #E53935;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.15s;
+  flex-shrink: 0;
+}
+
+.chat-input-area .chat-stop-btn:hover {
+  background: #C62828;
+  transform: scale(1.05);
+}
+
+.chat-input-area .chat-stop-btn:active {
+  transform: scale(0.95);
+}
+
+.chat-input-area .chat-stop-btn .stop-icon {
+  line-height: 1;
+}
+
 /* ================================================================
  * 响应式适配
  * ================================================================ */

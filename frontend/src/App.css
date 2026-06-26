@@ -95,6 +95,16 @@ body {
   box-shadow: 0 0 6px var(--accent-alert);
 }
 
+.app-header .session-badge {
+  margin-left: 12px;
+  padding: 2px 8px;
+  background: var(--border-subtle);
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+
 /* ================================================================
  * 主内容区（FilterBar + StatsPanel 左右布局）
  * ================================================================ */

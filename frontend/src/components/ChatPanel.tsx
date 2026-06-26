@@ -5,18 +5,19 @@
  * - 用户/助手消息气泡（深色主题）
  * - 思考中加载动画
  * - 自动滚动到底部
- * - 对话历史持久保留（存在于组件生命周期内）
+ * - 对话历史服务端持久化 + 会话恢复
  * - Enter 发送，Shift+Enter 换行
  * - 快捷建议按钮（空状态）
+ * - 工具调用消息折叠展示
  */
 
 import { useState, useRef, useEffect, type KeyboardEvent, type FormEvent } from 'react';
-import { sendChatMessage } from '../api/client';
-import type { ChatMessage, ParseResult } from '../types/log';
+import { sendChatMessage, getSession } from '../api/client';
+import type { ChatMessage, SessionMessage } from '../types/log';
 import './ChatPanel.css';
 
 interface ChatPanelProps {
-  parseResult: ParseResult;
+  sessionId: string;
 }
 
 /** 生成唯一消息 ID */
@@ -38,13 +39,45 @@ const SUGGESTIONS = [
   '日志时间跨度',
 ];
 
-export default function ChatPanel({ parseResult }: ChatPanelProps) {
+/**
+ * 将服务端存储的消息转换为展示用的 ChatMessage 列表。
+ * 过滤掉工具调用消息（用户不关心底层细节），只保留 user 和最终的 assistant 消息。
+ */
+function sessionMessagesToChatMessages(messages: SessionMessage[]): ChatMessage[] {
+  const chatMessages: ChatMessage[] = [];
+
+  for (const msg of messages) {
+    if (msg.role === 'user') {
+      chatMessages.push({
+        id: genId(),
+        role: 'user',
+        content: msg.content || '',
+        timestamp: '',
+      });
+    } else if (msg.role === 'assistant' && msg.content) {
+      // 只保留有实际文本内容的 assistant 消息
+      chatMessages.push({
+        id: genId(),
+        role: 'assistant',
+        content: msg.content,
+        timestamp: '',
+      });
+    }
+    // 跳过 role=tool 和空 content 的 assistant 消息（纯工具调用）
+  }
+
+  return chatMessages;
+}
+
+export default function ChatPanel({ sessionId }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isThinking, setIsThinking] = useState(false);
+  const [isRestoring, setIsRestoring] = useState(true);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   /** 自动滚动到底部 */
   function scrollToBottom() {
@@ -55,82 +88,38 @@ export default function ChatPanel({ parseResult }: ChatPanelProps) {
     scrollToBottom();
   }, [messages, isThinking]);
 
-  /** 发送消息 */
-  async function handleSend() {
-    const trimmed = input.trim();
-    if (!trimmed || isThinking) return;
+  /** 组件挂载时恢复会话历史 */
+  useEffect(() => {
+    async function restoreSession() {
+      if (!sessionId) {
+        setIsRestoring(false);
+        return;
+      }
 
-    // 1. 追加用户消息
-    const userMsg: ChatMessage = {
-      id: genId(),
-      role: 'user',
-      content: trimmed,
-      timestamp: formatTime(),
-    };
-    setMessages((prev) => [...prev, userMsg]);
-    setInput('');
-    setIsThinking(true);
-
-    // 2. 构建请求上下文
-    const summary = parseResult.summary;
-    const context = summary
-      ? {
-          totalLines: summary.totalLines,
-          errorCount: summary.errorCount,
-          warningCount: summary.warningCount,
-          components: summary.components,
-        }
-      : undefined;
-
-    const history = messages.map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
-
-    try {
-      const res = await sendChatMessage({
-        message: trimmed,
-        history,
-        context,
-      });
-
-      // 3. 追加助手回复
-      const assistantMsg: ChatMessage = {
-        id: genId(),
-        role: 'assistant',
-        content: res.reply,
-        timestamp: formatTime(),
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
-    } catch {
-      // 错误时追加系统提示
-      const errorMsg: ChatMessage = {
-        id: genId(),
-        role: 'assistant',
-        content: '⚠️ 请求失败，请检查后端服务是否正常运行。',
-        timestamp: formatTime(),
-      };
-      setMessages((prev) => [...prev, errorMsg]);
-    } finally {
-      setIsThinking(false);
-      // 恢复输入框焦点
-      inputRef.current?.focus();
+      try {
+        const session = await getSession(sessionId);
+        const restored = sessionMessagesToChatMessages(session.messages);
+        setMessages(restored);
+      } catch {
+        // 会话恢复失败（可能已删除），从新开始
+        console.warn('Session restore failed, starting fresh');
+      } finally {
+        setIsRestoring(false);
+      }
     }
-  }
 
-  /** 快捷建议点击 */
-  function handleSuggestion(suggestion: string) {
-    setInput(suggestion);
-    // 延迟执行以等待 state 更新
-    setTimeout(() => {
-      handleSendWithText(suggestion);
-    }, 50);
-  }
+    restoreSession();
+  }, [sessionId]);
 
-  /** 使用指定文本发送（用于快捷建议） */
-  async function handleSendWithText(text: string) {
+  /** 发送消息（内部实现） */
+  async function _sendMessage(text: string) {
     if (isThinking) return;
 
+    // 创建新的 AbortController
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    // 1. 追加用户消息
     const userMsg: ChatMessage = {
       id: genId(),
       role: 'user',
@@ -141,23 +130,13 @@ export default function ChatPanel({ parseResult }: ChatPanelProps) {
     setInput('');
     setIsThinking(true);
 
-    const summary = parseResult.summary;
-    const context = summary
-      ? {
-          totalLines: summary.totalLines,
-          errorCount: summary.errorCount,
-          warningCount: summary.warningCount,
-          components: summary.components,
-        }
-      : undefined;
-
-    const history = messages.map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
-
     try {
-      const res = await sendChatMessage({ message: text, history, context });
+      const res = await sendChatMessage(
+        { message: text, session_id: sessionId },
+        controller.signal,
+      );
+
+      // 2. 追加助手回复
       const assistantMsg: ChatMessage = {
         id: genId(),
         role: 'assistant',
@@ -165,18 +144,49 @@ export default function ChatPanel({ parseResult }: ChatPanelProps) {
         timestamp: formatTime(),
       };
       setMessages((prev) => [...prev, assistantMsg]);
-    } catch {
-      const errorMsg: ChatMessage = {
-        id: genId(),
-        role: 'assistant',
-        content: '⚠️ 请求失败，请检查后端服务是否正常运行。',
-        timestamp: formatTime(),
-      };
-      setMessages((prev) => [...prev, errorMsg]);
+    } catch (err: unknown) {
+      // 用户主动取消
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        const stoppedMsg: ChatMessage = {
+          id: genId(),
+          role: 'assistant',
+          content: '⏹ 已停止生成。',
+          timestamp: formatTime(),
+        };
+        setMessages((prev) => [...prev, stoppedMsg]);
+      } else {
+        // 网络/服务端错误
+        const errorMsg: ChatMessage = {
+          id: genId(),
+          role: 'assistant',
+          content: '⚠️ 请求失败，请检查后端服务是否正常运行，以及 LLM API Key 是否已配置。',
+          timestamp: formatTime(),
+        };
+        setMessages((prev) => [...prev, errorMsg]);
+      }
     } finally {
       setIsThinking(false);
+      abortControllerRef.current = null;
       inputRef.current?.focus();
     }
+  }
+
+  /** 发送消息（从输入框） */
+  function handleSend() {
+    const trimmed = input.trim();
+    if (!trimmed || isThinking) return;
+    _sendMessage(trimmed);
+  }
+
+  /** 停止生成 */
+  function handleStop() {
+    abortControllerRef.current?.abort();
+  }
+
+  /** 快捷建议点击 */
+  function handleSuggestion(suggestion: string) {
+    if (isThinking) return;
+    _sendMessage(suggestion);
   }
 
   /** 键盘事件：Enter 发送，Shift+Enter 换行 */
@@ -195,7 +205,6 @@ export default function ChatPanel({ parseResult }: ChatPanelProps) {
 
   /** 渲染消息内容（支持简单 Markdown：**bold** 和换行） */
   function renderContent(content: string) {
-    // 将 **text** 转换为 <strong>text</strong>
     const withBold = content.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     return { __html: withBold };
   }
@@ -216,7 +225,16 @@ export default function ChatPanel({ parseResult }: ChatPanelProps) {
       </div>
 
       {/* ---- 消息列表 / 空状态 ---- */}
-      {hasMessages ? (
+      {isRestoring ? (
+        <div className="chat-restoring">
+          <div className="thinking-dots">
+            <span className="thinking-dot" />
+            <span className="thinking-dot" />
+            <span className="thinking-dot" />
+          </div>
+          <span className="thinking-text">恢复会话中...</span>
+        </div>
+      ) : hasMessages ? (
         <div className="chat-messages">
           {messages.map((msg) => (
             <div key={msg.id} className={`chat-message ${msg.role}`}>
@@ -278,14 +296,25 @@ export default function ChatPanel({ parseResult }: ChatPanelProps) {
           rows={1}
           disabled={isThinking}
         />
-        <button
-          type="submit"
-          className="chat-send-btn"
-          disabled={!input.trim() || isThinking}
-          title="发送 (Enter)"
-        >
-          <span className="send-icon">➤</span>
-        </button>
+        {isThinking ? (
+          <button
+            type="button"
+            className="chat-stop-btn"
+            onClick={handleStop}
+            title="停止生成"
+          >
+            <span className="stop-icon">■</span>
+          </button>
+        ) : (
+          <button
+            type="submit"
+            className="chat-send-btn"
+            disabled={!input.trim()}
+            title="发送 (Enter)"
+          >
+            <span className="send-icon">➤</span>
+          </button>
+        )}
       </form>
     </div>
   );
