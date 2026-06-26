@@ -112,10 +112,43 @@ class LLMConfig:
 
 
 @dataclass
+class LangfuseConfig:
+    """
+    Langfuse 可观测性配置。
+
+    配置方式（按优先级）：
+    1. 环境变量
+    2. .env 文件
+    3. 默认值（enabled=False 时只打印日志，不上报）
+
+    示例：
+        LANGFUSE_ENABLED=true
+        LANGFUSE_PUBLIC_KEY=pk-lf-xxx
+        LANGFUSE_SECRET_KEY=sk-lf-xxx
+        LANGFUSE_HOST=https://cloud.langfuse.com
+    """
+
+    enabled: bool = False
+    public_key: str = ""
+    secret_key: str = ""
+    host: str = "https://cloud.langfuse.com"
+
+    @classmethod
+    def from_env(cls) -> "LangfuseConfig":
+        return cls(
+            enabled=os.getenv("LANGFUSE_ENABLED", "false").lower() == "true",
+            public_key=os.getenv("LANGFUSE_PUBLIC_KEY", ""),
+            secret_key=os.getenv("LANGFUSE_SECRET_KEY", ""),
+            host=os.getenv("LANGFUSE_BASE_URL", os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")),
+        )
+
+
+@dataclass
 class AppConfig:
     """应用全局配置"""
 
     llm: LLMConfig = field(default_factory=LLMConfig.from_env)
+    langfuse: LangfuseConfig = field(default_factory=LangfuseConfig.from_env)
     data_dir: str = field(
         default_factory=lambda: os.path.join(os.path.dirname(__file__), "data")
     )
@@ -126,6 +159,7 @@ class AppConfig:
     def from_env(cls) -> "AppConfig":
         return cls(
             llm=LLMConfig.from_env(),
+            langfuse=LangfuseConfig.from_env(),
             max_tool_iterations=int(os.getenv("AGENT_MAX_ITERATIONS", "10")),
             max_history_messages=int(os.getenv("AGENT_MAX_HISTORY", "40")),
         )

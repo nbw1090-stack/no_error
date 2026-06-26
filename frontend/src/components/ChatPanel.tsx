@@ -9,15 +9,21 @@
  * - Enter 发送，Shift+Enter 换行
  * - 快捷建议按钮（空状态）
  * - 工具调用消息折叠展示
+ *
+ * 性能优化：
+ * - 接受 initialMessages prop，父组件预加载时跳过 fetch
  */
 
 import { useState, useRef, useEffect, type KeyboardEvent, type FormEvent } from 'react';
-import { sendChatMessage, getSession } from '../api/client';
+import { sendChatMessage } from '../api/client';
 import type { ChatMessage, SessionMessage } from '../types/log';
 import './ChatPanel.css';
 
 interface ChatPanelProps {
   sessionId: string;
+  /** 预加载的会话消息（父组件并行请求后传入，避免冗余 fetch）。
+   *  undefined = 加载中，[...] = 已就绪 */
+  initialMessages?: SessionMessage[];
 }
 
 /** 生成唯一消息 ID */
@@ -69,7 +75,7 @@ function sessionMessagesToChatMessages(messages: SessionMessage[]): ChatMessage[
   return chatMessages;
 }
 
-export default function ChatPanel({ sessionId }: ChatPanelProps) {
+export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isThinking, setIsThinking] = useState(false);
@@ -88,28 +94,25 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
     scrollToBottom();
   }, [messages, isThinking]);
 
-  /** 组件挂载时恢复会话历史 */
+  /**
+   * 组件挂载时恢复会话历史。
+   *
+   * initialMessages 协议：
+   * - undefined  = 父组件正在加载中，等待（不自行 fetch）
+   * - []          = 空会话（新会话），直接显示空状态
+   * - [...]       = 预加载的消息，直接展示
+   */
   useEffect(() => {
-    async function restoreSession() {
-      if (!sessionId) {
-        setIsRestoring(false);
-        return;
-      }
-
-      try {
-        const session = await getSession(sessionId);
-        const restored = sessionMessagesToChatMessages(session.messages);
-        setMessages(restored);
-      } catch {
-        // 会话恢复失败（可能已删除），从新开始
-        console.warn('Session restore failed, starting fresh');
-      } finally {
-        setIsRestoring(false);
-      }
+    // 父组件还在加载中，等待其提供数据
+    if (initialMessages === undefined) {
+      return;
     }
 
-    restoreSession();
-  }, [sessionId]);
+    // 父组件已提供消息（可能是空数组）
+    const restored = sessionMessagesToChatMessages(initialMessages);
+    setMessages(restored);
+    setIsRestoring(false);
+  }, [sessionId, initialMessages]);
 
   /** 发送消息（内部实现） */
   async function _sendMessage(text: string) {

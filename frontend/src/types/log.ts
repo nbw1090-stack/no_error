@@ -71,6 +71,7 @@ export interface SessionInfo {
   created_at: string;
   updated_at: string;
   message_count: number;
+  title: string;
 }
 
 /** 会话详情（含完整消息历史，用于恢复） */

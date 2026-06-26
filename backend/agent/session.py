@@ -124,13 +124,22 @@ class SessionManager:
                 try:
                     with open(path, "r") as f:
                         data = json.load(f)
+                    # 提取首条用户消息的前15个字符作为标题
+                    messages = data.get("messages", [])
+                    title = ""
+                    for msg in messages:
+                        if msg.get("role") == "user" and msg.get("content"):
+                            title = msg["content"][:15]
+                            break
+
                     sessions.append(
                         {
                             "session_id": data["session_id"],
                             "dataset_id": data["dataset_id"],
                             "created_at": data["created_at"],
                             "updated_at": data["updated_at"],
-                            "message_count": len(data.get("messages", [])),
+                            "message_count": len(messages),
+                            "title": title,
                         }
                     )
                 except (json.JSONDecodeError, KeyError):

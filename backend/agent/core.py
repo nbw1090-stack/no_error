@@ -5,11 +5,15 @@ Agent 核心 —— ReAct 循环
 1. LLM 分析用户问题，决定调用哪些工具
 2. 执行工具，将结果反馈给 LLM
 3. LLM 基于工具结果生成最终回复
+
+Langfuse v4 可观测性：通过 OTEL 上下文自动嵌套，
+无需手动传递 trace/span 对象。
 """
 
 import json
 import logging
 
+from observability import get_client
 from agent.llm.base import BaseLLMAdapter
 from agent.tools.registry import ToolRegistry
 from agent.context import ConversationContext
@@ -51,6 +55,9 @@ class Agent:
         """
         执行一次 Agent 对话轮次。
 
+        Langfuse 追踪自动嵌套：调用方用 tracer.observation("chat")
+        包裹此方法，内部的 ReAct 迭代和 LLM 调用会自动成为其子节点。
+
         Args:
             session_id: 会话 ID
             user_message: 用户消息
@@ -58,10 +65,9 @@ class Agent:
 
         Returns:
             Agent 的最终文本回复
-
-        Raises:
-            ValueError: 会话不存在
         """
+        tracer = get_client()
+
         # ---- 1. 加载会话 ----
         session = self.session_manager.get(session_id)
         if not session:
@@ -87,26 +93,16 @@ class Agent:
         final_reply = ""
 
         for iteration in range(self.max_iterations):
-            # 重新加载会话以获取最新消息（包括前几轮的工具调用结果）
             session = self.session_manager.get(session_id)
             if not session:
                 raise ValueError(f"Session lost during run: {session_id}")
 
-            # 构建消息列表
-            # 第 0 轮：system + history + user_message
-            # 后续轮：system + 完整会话消息（已包含 user、assistant tool_calls、tool results）
             if iteration == 0:
                 messages = ctx.build_messages(
-                    history=[],  # user_message 已存入 session.messages
-                    user_message=user_message,
-                )
-                # 实际上应使用 session 中的完整历史
-                messages = ctx.build_messages(
-                    history=session.messages[:-1],  # 排除刚加入的 user message
+                    history=session.messages[:-1],
                     user_message=user_message,
                 )
             else:
-                # 后续轮次：system + 全部会话消息
                 messages = [{"role": "system", "content": system_prompt}]
                 messages.extend(session.messages)
 
@@ -116,56 +112,87 @@ class Agent:
                 len(messages),
             )
 
-            # ---- 调用 LLM ----
-            response = await self.llm.chat(messages, tool_schemas)
+            # ---- Langfuse: 迭代 span（自动嵌套到外层 chat trace 下） ----
+            with tracer.observation(
+                name=f"react-iteration-{iteration}",
+                input={
+                    "iteration": iteration,
+                    "messages_count": len(messages),
+                },
+            ) as iter_span:
 
-            # 保存助手消息到会话
-            self.session_manager.add_message(session_id, response)
+                # ---- 调用 LLM（generation 自动嵌套到 iter_span 下） ----
+                response = await self.llm.chat(messages, tool_schemas)
 
-            # ---- 检查是否有工具调用 ----
-            if response.get("tool_calls"):
-                for tc in response["tool_calls"]:
-                    func_name = tc["function"]["name"]
-                    try:
-                        func_args = json.loads(tc["function"]["arguments"])
-                    except json.JSONDecodeError:
-                        func_args = {}
+                # 保存助手消息到会话
+                self.session_manager.add_message(session_id, response)
 
-                    logger.info(
-                        "Tool call [%d]: %s(%s)",
-                        iteration,
-                        func_name,
-                        json.dumps(func_args, ensure_ascii=False),
+                # ---- 检查是否有工具调用 ----
+                if response.get("tool_calls"):
+                    for tc in response["tool_calls"]:
+                        func_name = tc["function"]["name"]
+                        try:
+                            func_args = json.loads(tc["function"]["arguments"])
+                        except json.JSONDecodeError:
+                            func_args = {}
+
+                        logger.info(
+                            "Tool call [%d]: %s(%s)",
+                            iteration,
+                            func_name,
+                            json.dumps(func_args, ensure_ascii=False),
+                        )
+
+                        # ---- Langfuse: 工具 span（自动嵌套到 iter_span 下） ----
+                        with tracer.observation(
+                            name=f"tool-{func_name}",
+                            input={
+                                "tool_name": func_name,
+                                "arguments": func_args,
+                            },
+                        ) as tool_span:
+                            result_str = await ToolRegistry.execute(
+                                func_name, func_args, dataset
+                            )
+                            tool_span.update(
+                                output={"result": result_str[:2000]},
+                            )
+
+                        # 将工具结果加入会话
+                        self.session_manager.add_message(
+                            session_id,
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "content": result_str,
+                            },
+                        )
+
+                    iter_span.update(
+                        output={
+                            "tool_calls_count": len(response["tool_calls"])
+                        }
                     )
+                    continue
 
-                    # 执行工具
-                    result_str = await ToolRegistry.execute(
-                        func_name, func_args, dataset
-                    )
+                # ---- 无工具调用 → 最终回复 ----
+                final_reply = response.get("content") or ""
 
-                    # 将工具结果加入会话
-                    self.session_manager.add_message(
-                        session_id,
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc["id"],
-                            "content": result_str,
-                        },
-                    )
+                iter_span.update(
+                    output={
+                        "final_reply": final_reply[:500],
+                        "is_final": True,
+                    }
+                )
 
-                # 继续循环，让 LLM 处理工具结果
-                continue
+                if final_reply.strip():
+                    break
 
-            # ---- 无工具调用 → 最终回复 ----
-            final_reply = response.get("content") or ""
-            if final_reply.strip():
-                break
-
-            # content 为空但没有工具调用 → 让 LLM 继续
-            logger.warning("Empty response with no tool calls, retrying...")
+                logger.warning(
+                    "Empty response with no tool calls, retrying..."
+                )
 
         else:
-            # 达到最大迭代次数
             logger.warning(
                 "Max iterations (%d) reached for session %s",
                 self.max_iterations,

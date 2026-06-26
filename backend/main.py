@@ -30,6 +30,7 @@ from agent.llm.factory import create_llm
 from agent.session import SessionManager
 from agent.core import Agent
 from agent.dataset import LogDataset
+from observability import init_observability, get_client
 
 # 触发工具注册（导入即注册）
 import agent.tools  # noqa: F401
@@ -47,6 +48,16 @@ logger = logging.getLogger(__name__)
 # 配置
 # ============================================================
 config = AppConfig.from_env()
+
+# ============================================================
+# 可观测性（Langfuse）
+# ============================================================
+observability = init_observability(config.langfuse)
+logger.info(
+    "Observability: langfuse_enabled=%s, host=%s",
+    config.langfuse.enabled,
+    config.langfuse.host,
+)
 
 # ============================================================
 # 初始化 Agent 组件（模块级别，全应用共享）
@@ -140,69 +151,98 @@ async def parse_log(file: UploadFile = File(...)):
     接收 multipart/form-data，字段名为 file。
     流程：保存文件 → 解压提取 → 解析日志 → 持久化数据集 → 清理临时文件。
     """
+    tracer = get_client()
     temp_path = None
-    try:
-        # ---- 1. 保存上传文件到临时目录 ----
-        safe_filename = file.filename or "dump_info.tar.gz"
-        temp_path = os.path.join(UPLOAD_DIR, safe_filename)
 
-        with open(temp_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
+    with tracer.observation(
+        name="parse-log",
+        input={
+            "filename": file.filename,
+            "content_type": file.content_type,
+        },
+    ) as parse_trace:
+        try:
+            # ---- 1. 保存上传文件到临时目录 ----
+            safe_filename = file.filename or "dump_info.tar.gz"
+            temp_path = os.path.join(UPLOAD_DIR, safe_filename)
 
-        # ---- 2. 解压提取日志内容 ----
-        app_content, framework_content = extract_logs(temp_path)
+            with open(temp_path, "wb") as buffer:
+                content = await file.read()
+                buffer.write(content)
 
-        # ---- 3. 解析日志 ----
-        result = parse_logs(app_content, framework_content)
+            # ---- 2. 解压提取日志内容 ----
+            app_content, framework_content = extract_logs(temp_path)
 
-        # ---- 4. 持久化数据集 ----
-        dataset_id = uuid.uuid4().hex[:12]
-        dataset_path = os.path.join(DATASETS_DIR, f"{dataset_id}.json")
-        dataset_data = {
-            "dataset_id": dataset_id,
-            "entries": result["entries"],
-            "summary": result["summary"],
-        }
-        with open(dataset_path, "w") as f:
-            json.dump(dataset_data, f, ensure_ascii=False)
+            # ---- 3. 解析日志 ----
+            result = parse_logs(app_content, framework_content)
 
-        logger.info(
-            "Dataset saved: %s (%d entries)",
-            dataset_id,
-            len(result["entries"]),
-        )
-
-        # ---- 5. 返回成功响应 ----
-        return JSONResponse(
-            content={
-                "success": True,
+            # ---- 4. 持久化数据集 ----
+            dataset_id = uuid.uuid4().hex[:12]
+            dataset_path = os.path.join(DATASETS_DIR, f"{dataset_id}.json")
+            dataset_data = {
                 "dataset_id": dataset_id,
-                "summary": result["summary"],
                 "entries": result["entries"],
-                "errors": [],
+                "summary": result["summary"],
             }
-        )
+            with open(dataset_path, "w") as f:
+                json.dump(dataset_data, f, ensure_ascii=False)
 
-    except Exception as e:
-        logger.exception("Parse failed")
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "summary": None,
-                "entries": [],
-                "errors": [str(e)],
-            },
-        )
+            logger.info(
+                "Dataset saved: %s (%d entries)",
+                dataset_id,
+                len(result["entries"]),
+            )
 
-    finally:
-        # ---- 6. 清理临时文件 ----
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
+            parse_trace.update(
+                output={
+                    "dataset_id": dataset_id,
+                    "entries_count": len(result["entries"]),
+                    "total_lines": result["summary"].get("totalLines", 0),
+                    "error_count": result["summary"].get("errorCount", 0),
+                    "components_count": len(
+                        result["summary"].get("components", [])
+                    ),
+                },
+            )
+
+            tracer.flush()
+
+            # ---- 5. 返回成功响应 ----
+            return JSONResponse(
+                content={
+                    "success": True,
+                    "dataset_id": dataset_id,
+                    "summary": result["summary"],
+                    "entries": result["entries"],
+                    "errors": [],
+                }
+            )
+
+        except Exception as e:
+            logger.exception("Parse failed")
+            parse_trace.update(
+                output={"error": str(e)},
+                level="ERROR",
+                status_message=str(e)[:200],
+            )
+            tracer.flush()
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "success": False,
+                    "summary": None,
+                    "entries": [],
+                    "errors": [str(e)],
+                },
+            )
+
+        finally:
+            # ---- 6. 清理临时文件 ----
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
 
 # ============================================================
@@ -238,31 +278,73 @@ async def chat(req: ChatRequest):
         summary=data["summary"],
     )
 
+    tracer = get_client()
+
     # ---- Agent 模式 ----
     if agent is not None:
-        try:
-            reply = await agent.run(
-                session_id=req.session_id,
-                user_message=message,
-                dataset=dataset,
-            )
-            return {"reply": reply}
-        except Exception as e:
-            logger.exception("Agent run failed")
-            raise HTTPException(
-                status_code=500, detail=f"Analysis failed: {str(e)}"
-            )
+        with tracer.observation(
+            name="chat",
+            session_id=req.session_id,
+            input={
+                "message": message,
+                "session_id": req.session_id,
+                "dataset_id": session.dataset_id,
+            },
+            metadata={
+                "dataset_entries": len(dataset.entries),
+                "llm_model": config.llm.model,
+                "llm_provider": config.llm.provider,
+            },
+        ) as trace:
+            try:
+                reply = await agent.run(
+                    session_id=req.session_id,
+                    user_message=message,
+                    dataset=dataset,
+                )
+                trace.update(output={"reply": reply[:2000]})
+            except Exception as e:
+                logger.exception("Agent run failed")
+                trace.update(
+                    output={"error": str(e)},
+                    level="ERROR",
+                    status_message=str(e)[:200],
+                )
+                raise HTTPException(
+                    status_code=500, detail=f"Analysis failed: {str(e)}"
+                )
+
+        # 确保 trace 数据立即发送到 Langfuse
+        tracer.flush()
+        return {"reply": reply}
 
     # ---- 降级模式：规则匹配 ----
     logger.info("Agent unavailable, using fallback rule-based reply")
-    reply = _generate_reply(message, dataset.summary)
-    # 仍需将消息记录到会话
-    session_manager.add_message(
-        req.session_id, {"role": "user", "content": message}
-    )
-    session_manager.add_message(
-        req.session_id, {"role": "assistant", "content": reply}
-    )
+
+    with tracer.observation(
+        name="chat-fallback",
+        session_id=req.session_id,
+        input={
+            "message": message,
+            "session_id": req.session_id,
+            "dataset_id": session.dataset_id,
+        },
+        metadata={
+            "mode": "rule_based",
+            "dataset_entries": len(dataset.entries),
+        },
+    ) as trace:
+        reply = _generate_reply(message, dataset.summary)
+        # 将消息记录到会话
+        session_manager.add_message(
+            req.session_id, {"role": "user", "content": message}
+        )
+        session_manager.add_message(
+            req.session_id, {"role": "assistant", "content": reply}
+        )
+        trace.update(output={"reply": reply[:2000]})
+
+    tracer.flush()
     return {"reply": reply}
 
 
@@ -341,6 +423,32 @@ def _generate_reply(message: str, summary: dict) -> str:
 
 
 # ============================================================
+# 数据集 API
+# ============================================================
+
+
+@app.get("/api/datasets/{dataset_id}")
+async def get_dataset(dataset_id: str):
+    """
+    获取数据集详情（含日志条目和汇总统计）。
+
+    用于会话切换时重新加载日志分析数据。
+    """
+    dataset_path = os.path.join(DATASETS_DIR, f"{dataset_id}.json")
+    if not os.path.exists(dataset_path):
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    with open(dataset_path) as f:
+        data = json.load(f)
+
+    return {
+        "dataset_id": data["dataset_id"],
+        "entries": data["entries"],
+        "summary": data["summary"],
+    }
+
+
+# ============================================================
 # 会话管理 API
 # ============================================================
 
@@ -403,6 +511,20 @@ async def delete_session(session_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"deleted": True}
+
+
+# ============================================================
+# 应用生命周期事件
+# ============================================================
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭时确保 Langfuse 数据刷新"""
+    obs = get_client()
+    if obs.enabled:
+        logger.info("Flushing Langfuse data before shutdown...")
+        obs.shutdown()
 
 
 # ============================================================

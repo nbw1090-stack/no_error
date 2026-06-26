@@ -72,6 +72,32 @@ export async function sendChatMessage(
 }
 
 // ============================================================
+// 数据集 API
+// ============================================================
+
+/**
+ * 获取数据集详情（含日志条目和汇总统计）
+ *
+ * 用于会话切换时重新加载日志分析数据。
+ */
+export async function getDataset(datasetId: string): Promise<ParseResult> {
+  const response = await fetch(`${API_BASE}/datasets/${datasetId}`);
+
+  if (!response.ok) {
+    throw new Error('数据集不存在');
+  }
+
+  const data = await response.json();
+  return {
+    success: true,
+    dataset_id: data.dataset_id,
+    summary: data.summary,
+    entries: data.entries,
+    errors: [],
+  };
+}
+
+// ============================================================
 // 会话管理 API
 // ============================================================
 
