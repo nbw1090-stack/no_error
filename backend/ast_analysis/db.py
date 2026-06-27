@@ -219,6 +219,146 @@ def find_function_at_line(
         conn.close()
 
 
+def find_symbols_by_name(
+    user_id: int, component: str, name: str, limit: int = 20
+) -> list[dict]:
+    """
+    按 (user_id, component, name) 模糊匹配符号（大小写不敏感子串匹配）。
+
+    用于 agent 主动按函数/类名检索源码，区别于 find_function_at_line
+    的按日志行号反查：用户问"xxx 函数是做什么的"时命中这里。
+
+    Returns:
+        [{rel_path, name, kind, start_line, end_line}, ...] —— 跨文件的全部命中，
+        最多 limit 条。
+    """
+    needle = (name or "").lower()
+    conn = sqlite3.connect(AST_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.execute(
+            "SELECT rel_path, symbols FROM ast_files "
+            "WHERE user_id = ? AND component = ?",
+            (user_id, component),
+        )
+        hits: list[dict] = []
+        for r in cur.fetchall():
+            rel_path = r["rel_path"]
+            try:
+                symbols = json.loads(r["symbols"] or "[]")
+            except json.JSONDecodeError:
+                symbols = []
+            for sym in symbols:
+                sym_name = str(sym.get("name", ""))
+                if needle and needle in sym_name.lower():
+                    hits.append(
+                        {
+                            "rel_path": rel_path,
+                            "name": sym_name,
+                            "kind": sym.get("kind", ""),
+                            "start_line": int(sym.get("start_line", 0)),
+                            "end_line": int(sym.get("end_line", 0)),
+                        }
+                    )
+                    if len(hits) >= limit:
+                        return hits
+        return hits
+    finally:
+        conn.close()
+
+
+def list_component_files(user_id: int, component: str) -> list[dict]:
+    """
+    列出某组件下所有已索引的源码文件，附带每个文件的符号清单。
+
+    供 agent 浏览组件代码结构后再决定读取哪个文件/符号。
+
+    Returns:
+        [{rel_path, language, symbol_count,
+          symbols:[{name, kind, start_line, end_line}, ...]}, ...]
+    """
+    conn = sqlite3.connect(AST_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.execute(
+            "SELECT rel_path, language, symbol_count, symbols FROM ast_files "
+            "WHERE user_id = ? AND component = ? ORDER BY rel_path",
+            (user_id, component),
+        )
+        files: list[dict] = []
+        for r in cur.fetchall():
+            try:
+                symbols = json.loads(r["symbols"] or "[]")
+            except json.JSONDecodeError:
+                symbols = []
+            files.append(
+                {
+                    "rel_path": r["rel_path"],
+                    "language": r["language"],
+                    "symbol_count": r["symbol_count"],
+                    "symbols": [
+                        {
+                            "name": s.get("name", ""),
+                            "kind": s.get("kind", ""),
+                            "start_line": int(s.get("start_line", 0)),
+                            "end_line": int(s.get("end_line", 0)),
+                        }
+                        for s in symbols
+                    ],
+                }
+            )
+        return files
+    finally:
+        conn.close()
+
+
+def get_file_symbols(
+    user_id: int, component: str, rel_path: str
+) -> dict | None:
+    """
+    取某组件单个源文件的符号清单（单行精确查询，避免 list_component_files
+    把整个组件所有文件符号全部载入）。
+
+    供 gather_code_context 取「同文件兄弟符号」之用。
+
+    Returns:
+        {rel_path, language, symbol_count,
+         symbols:[{name, kind, start_line, end_line}, ...]}
+        rel_path 不存在时返回 None。
+    """
+    conn = sqlite3.connect(AST_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.execute(
+            "SELECT rel_path, language, symbol_count, symbols FROM ast_files "
+            "WHERE user_id = ? AND component = ? AND rel_path = ?",
+            (user_id, component, rel_path),
+        )
+        r = cur.fetchone()
+        if r is None:
+            return None
+        try:
+            symbols = json.loads(r["symbols"] or "[]")
+        except json.JSONDecodeError:
+            symbols = []
+        return {
+            "rel_path": r["rel_path"],
+            "language": r["language"],
+            "symbol_count": r["symbol_count"],
+            "symbols": [
+                {
+                    "name": s.get("name", ""),
+                    "kind": s.get("kind", ""),
+                    "start_line": int(s.get("start_line", 0)),
+                    "end_line": int(s.get("end_line", 0)),
+                }
+                for s in symbols
+            ],
+        }
+    finally:
+        conn.close()
+
+
 # ============================================================
 # 写入（单事务原子）
 # ============================================================

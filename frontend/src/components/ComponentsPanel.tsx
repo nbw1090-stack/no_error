@@ -6,8 +6,10 @@
  * - 是否可用：只读状态徽章，反映该组件「是否已进行 AST 分析」
  *   （可用 = 已分析；不可用 = 暂未被 AST 分析）
  * - 更新：对该组件单独发起 AST 语法分析（成功后置为可用）
- * - 删除：删除该组件的 AST 分析结果（二次确认 ✓/✗），
+ * - 删除分析：删除该组件的 AST 分析结果（二次确认 ✓/✗），
  *   组件本身保留在列表中，仅标记为不可用
+ * - 删除组件：从注册表彻底删除该组件（二次确认 ✓/✗），
+ *   后端会一并清空其 AST 分析数据，删除后该组件从列表消失
  * - 添加组件：顶部按钮打开内联表单，调用 createComponent
  * - 批量 AST 分析：多选组件后一键发起增量分析（SSE 流）
  *
@@ -20,6 +22,7 @@ import type { AstAnalyzeEvent, AstResult } from '../types/ast';
 import {
   listComponents,
   createComponent,
+  deleteComponent,
   deleteAstAnalysis,
   getAstResult,
   analyzeAstStream,
@@ -56,7 +59,6 @@ interface ComponentsPanelProps {
 const STAGE_LABEL: Record<string, string> = {
   cloning: '正在克隆',
   parsing: '正在解析',
-  removing: '正在移除',
 };
 
 const ACTION_LABEL: Record<ComponentFeedItem['action'], string> = {
@@ -77,7 +79,9 @@ export default function ComponentsPanel({ authed = false }: ComponentsPanelProps
   const [addError, setAddError] = useState<string | null>(null);
 
   // ---- 删除确认 + 行内错误 ----
+  // confirmName：删除「AST 分析」的二次确认行；confirmDeleteCompName：彻底「删除组件」的二次确认行
   const [confirmName, setConfirmName] = useState<string | null>(null);
+  const [confirmDeleteCompName, setConfirmDeleteCompName] = useState<string | null>(null);
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
 
   // ---- 多选（AST 分析目标） ----
@@ -279,6 +283,53 @@ export default function ComponentsPanel({ authed = false }: ComponentsPanelProps
     }
   }
 
+  /**
+   * 「删除组件」操作：从注册表中彻底删除该组件（后端同时清空其 AST 分析数据）。
+   * 乐观地从列表与多选中移除；失败则函数式回滚（仅恢复本行，避免覆盖期间的并发编辑）。
+   */
+  async function handleDeleteComponent(comp: ComponentInfo) {
+    const originalComp = comp;
+    const wasSelected = selectedNames.has(comp.name);
+
+    // 清掉该行既有错误
+    setRowErrors((prev) => {
+      const next = { ...prev };
+      delete next[comp.name];
+      return next;
+    });
+    // 乐观移除：列表 + 多选
+    setComponents((prev) => prev.filter((c) => c.name !== comp.name));
+    setSelectedNames((prev) => {
+      if (!prev.has(comp.name)) return prev;
+      const next = new Set(prev);
+      next.delete(comp.name);
+      return next;
+    });
+    // 退出两种确认态
+    setConfirmDeleteCompName(null);
+    setConfirmName(null);
+
+    try {
+      await deleteComponent(comp.name);
+      // 后端已清空该组件的 AST 分析数据，刷新「AST 分析结果」面板
+      void refreshAstResult();
+    } catch (e) {
+      // 函数式回滚：仅补回被删的组件与其选中态
+      setComponents((prev) =>
+        prev.some((c) => c.name === comp.name) ? prev : [...prev, originalComp],
+      );
+      if (wasSelected) {
+        setSelectedNames((prev) =>
+          prev.has(comp.name) ? prev : new Set([...prev, comp.name]),
+        );
+      }
+      setRowErrors((prevErr) => ({
+        ...prevErr,
+        [comp.name]: e instanceof Error ? e.message : '删除组件失败',
+      }));
+    }
+  }
+
   /** 提交添加 */
   async function handleAdd() {
     setAddError(null);
@@ -445,9 +496,6 @@ export default function ComponentsPanel({ authed = false }: ComponentsPanelProps
                 未变 <b>{summaryStats.unchanged}</b>
               </span>
               <span className="ast-summary-item">
-                移除 <b>{summaryStats.removed}</b>
-              </span>
-              <span className="ast-summary-item">
                 失败 <b>{summaryStats.error}</b>
               </span>
               <span className="ast-summary-divider" />
@@ -559,7 +607,8 @@ export default function ComponentsPanel({ authed = false }: ComponentsPanelProps
             </thead>
             <tbody>
               {components.map((comp) => {
-                const isConfirming = confirmName === comp.name;
+                const isConfirmAst = confirmName === comp.name;
+                const isConfirmDeleteComp = confirmDeleteCompName === comp.name;
                 const rowError = rowErrors[comp.name];
 
                 return (
@@ -596,7 +645,25 @@ export default function ComponentsPanel({ authed = false }: ComponentsPanelProps
                       {rowError && <span className="row-inline-error">{rowError}</span>}
                     </td>
                     <td className="cell-actions">
-                      {isConfirming ? (
+                      {isConfirmDeleteComp ? (
+                        <span className="delete-confirm">
+                          <span className="confirm-text">删除组件?</span>
+                          <span
+                            className="confirm-yes"
+                            onClick={() => handleDeleteComponent(comp)}
+                            title="确认彻底删除该组件（含其 AST 分析数据）"
+                          >
+                            ✓
+                          </span>
+                          <span
+                            className="confirm-no"
+                            onClick={() => setConfirmDeleteCompName(null)}
+                            title="取消"
+                          >
+                            ✕
+                          </span>
+                        </span>
+                      ) : isConfirmAst ? (
                         <span className="delete-confirm">
                           <span className="confirm-text">删除分析?</span>
                           <span
@@ -630,11 +697,25 @@ export default function ComponentsPanel({ authed = false }: ComponentsPanelProps
                           </button>
                           <button
                             className="component-btn small danger"
-                            onClick={() => setConfirmName(comp.name)}
+                            onClick={() => {
+                              setConfirmDeleteCompName(null);
+                              setConfirmName(comp.name);
+                            }}
                             disabled={analyzing}
                             title="删除此组件的 AST 分析（组件保留，标记为不可用）"
                           >
-                            删除
+                            删除分析
+                          </button>
+                          <button
+                            className="component-btn small danger"
+                            onClick={() => {
+                              setConfirmName(null);
+                              setConfirmDeleteCompName(comp.name);
+                            }}
+                            disabled={analyzing}
+                            title="彻底删除此组件（含其 AST 分析数据），不可恢复"
+                          >
+                            删除组件
                           </button>
                         </>
                       )}

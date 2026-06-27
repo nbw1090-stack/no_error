@@ -323,11 +323,37 @@ export async function fetchEntries(
 // ============================================================
 
 /**
- * 创建新的聊天会话（归属当前登录用户，由 token 决定）
+ * 创建新的聊天会话（归属当前登录用户，由 token 决定）。
+ *
+ * datasetId 为空时创建「纯对话会话」（未上传日志，可直接提问）。
  */
-export async function createSession(datasetId: string): Promise<SessionInfo> {
+export async function createSession(
+  datasetId?: string | null
+): Promise<SessionInfo> {
   const response = await fetch(`${API_BASE}/sessions`, {
     method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ dataset_id: datasetId ?? null }),
+  });
+
+  if (response.status === 401) onUnauthorized();
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    throw new Error(errorData?.detail || '创建会话失败');
+  }
+
+  return response.json();
+}
+
+/**
+ * 把数据集绑定到已有会话（先对话后上传的升级场景）。
+ */
+export async function linkDatasetToSession(
+  sessionId: string,
+  datasetId: string
+): Promise<{ session_id: string; dataset_id: string }> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/dataset`, {
+    method: 'PUT',
     headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ dataset_id: datasetId }),
   });
@@ -335,7 +361,7 @@ export async function createSession(datasetId: string): Promise<SessionInfo> {
   if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     const errorData = await response.json().catch(() => null);
-    throw new Error(errorData?.detail || '创建会话失败');
+    throw new Error(errorData?.detail || '绑定数据集失败');
   }
 
   return response.json();

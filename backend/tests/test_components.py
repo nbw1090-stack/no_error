@@ -131,6 +131,44 @@ def test_delete_missing_returns_404(authed):
     assert resp.status_code == 404
 
 
+def test_delete_component_also_clears_ast_analysis(authed):
+    """删除组件应同时清空其 AST 分析数据，避免残留孤儿结果。"""
+    import ast_analysis
+
+    user_id = authed["user_id"]
+    headers = authed["headers"]
+    client = authed["client"]
+
+    # 直接为 sensor 播种一份 AST 分析数据（无需真实 git clone）
+    ast_analysis.db.replace_component(
+        user_id,
+        "sensor",
+        "https://github.com/bmc-org/sensor.git",
+        "main",
+        "abcdef01",
+        "2026-01-01T00:00:00+00:00",
+        [],
+    )
+
+    # 删除前：注册表含 sensor，AST 结果也含 sensor
+    assert "sensor" in _names(_get(authed).json())
+    before = client.get("/api/ast/result", headers=headers)
+    assert before.status_code == 200
+    assert any(c["component"] == "sensor" for c in before.json()["components"])
+
+    # 删除组件
+    resp = client.delete("/api/components/sensor", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"deleted": True}
+
+    # 注册表中已无 sensor
+    assert "sensor" not in _names(_get(authed).json())
+
+    # sensor 是唯一的 AST 分析数据 → 删除后结果为空 → 404
+    after = client.get("/api/ast/result", headers=headers)
+    assert after.status_code == 404
+
+
 # ============================================================
 # 用户隔离：不同用户互不可见
 # ============================================================
@@ -166,3 +204,39 @@ def test_components_isolated_between_users(client):
     # 两人各自都拥有默认种子（注册即播种）
     assert SEED_NAMES.issubset(a_names)
     assert SEED_NAMES.issubset(b_names)
+
+
+def test_delete_component_isolated_per_user(client):
+    """删除 alice 的组件不得影响 bob 的同名组件或其 AST 分析数据。"""
+    import ast_analysis
+
+    alice = _register(client, "alice", "aaa111")
+    bob = _register(client, "bob", "bbb222")
+
+    # 两人各自的 sensor 都播种一份 AST 分析数据
+    for tok in (alice, bob):
+        ast_analysis.db.replace_component(
+            tok["user_id"],
+            "sensor",
+            "https://github.com/bmc-org/sensor.git",
+            "main",
+            "abcdef01",
+            "2026-01-01T00:00:00+00:00",
+            [],
+        )
+
+    # alice 删除自己的 sensor（注册表 + alice 的 AST 数据）
+    resp = client.delete("/api/components/sensor", headers=alice["headers"])
+    assert resp.status_code == 200, resp.text
+
+    # alice：注册表无 sensor，AST 结果随之清空 → 404
+    a_names = _names(client.get("/api/components", headers=alice["headers"]).json())
+    assert "sensor" not in a_names
+    assert client.get("/api/ast/result", headers=alice["headers"]).status_code == 404
+
+    # bob：sensor 仍在注册表，AST 结果仍含 sensor（未被波及）
+    b_names = _names(client.get("/api/components", headers=bob["headers"]).json())
+    assert "sensor" in b_names
+    bob_result = client.get("/api/ast/result", headers=bob["headers"])
+    assert bob_result.status_code == 200
+    assert any(c["component"] == "sensor" for c in bob_result.json()["components"])

@@ -43,11 +43,20 @@ class ObservabilityClient:
         usage_details: dict | None = None,
         level: str | None = None,
         status_message: str | None = None,
-        **kwargs,
+        # —— trace 级属性（user_id / session_id / trace metadata）——
+        # Langfuse v4 的 start_as_current_observation 不接受这些参数，
+        # 必须用 propagate_attributes 单独设置并传播给所有子 observation。
+        # 在此处拦截，调用方只需像传 session_id 一样传 user_id 即可。
+        user_id: str | None = None,
+        session_id: str | None = None,
+        trace_metadata: dict | None = None,
     ):
         """
         创建一个 observation（自动嵌套到当前上下文中）。
 
+        user_id / session_id 是 trace 级维度：设置后，该 trace 及其全部子节点
+        （react-iteration / tool / llm-generation）都会带上 user.id / session.id
+        OTEL 属性——这是 Langfuse「按用户/会话聚合 token 成本」等分析的必要条件。
         当 enabled=False 时自动降级为空操作。
         """
         if not self.enabled:
@@ -65,9 +74,20 @@ class ObservabilityClient:
                 usage_details=usage_details,
                 level=level,
                 status_message=status_message,
-                **kwargs,
             ) as obs:
-                yield obs
+                # 尽早传播 trace 级属性：必须在子节点（LLM 调用等）生成之前激活，
+                # 否则早于此处的 observation 不会被纳入按 user/session 的聚合。
+                if user_id or session_id or trace_metadata:
+                    from langfuse import propagate_attributes
+
+                    with propagate_attributes(
+                        user_id=user_id,
+                        session_id=session_id,
+                        metadata=trace_metadata,
+                    ):
+                        yield obs
+                else:
+                    yield obs
         except Exception as e:
             logger.warning("Langfuse observation '%s' failed: %s", name, e)
             yield _NoopObservation()

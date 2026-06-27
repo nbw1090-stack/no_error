@@ -4,9 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A BMC (Baseband Management Controller) log analysis tool. Users upload a `dump_info.tar.gz`, the backend extracts + parses `app.log`/`framework.log`, and a dashboard renders the structured entries. On top of the dashboard sits a **ReAct agent chat** that analyzes the uploaded logs via tools. The UI follows a WattVision dark-theme spec (see `design-md-sistema-de-monitoreo-el-ctrico-wattvision-DESIGN.md`).
+A BMC (Baseband Management Controller) log analysis tool with a ReAct agent chat on top. The end-to-end story:
 
-**Note:** `README.md` only documents the log-parser dashboard and is out of date. The codebase also has the agent chat system (`backend/agent/`, `frontend/src/components/ChatPanel.tsx` + `SessionSidebar.tsx`) and Langfuse observability. Trust the code over the README.
+1. **Authenticate** (`backend/auth/`) — register/login returns a bearer token; `get_current_user` gates every business endpoint.
+2. **Upload & parse** — user uploads `dump_info.tar.gz`; the backend extracts + parses `app.log`/`framework.log` in memory and renders structured entries on a WattVision dark-theme dashboard.
+3. **Chat with a ReAct agent** (`backend/agent/`) — the agent analyzes the uploaded logs by calling tools (search/filter/stats/timeline/context). When the user has built an **AST source index** for a component, the agent also grounds root-cause diagnosis in the actual source code (function bodies, sibling symbols, cross-file call sites) via the source tools.
+4. **Observe** — optional **Langfuse v4** tracing auto-nests every chat into `chat → react-iteration → llm-generation / tool`.
+
+Supporting subsystems, all **per-user isolated** (sessions / datasets / components / source indexes are invisible across users):
+- **Component registry** (`backend/db.py`, SQLite) — manages the component repos available for source analysis.
+- **AST source analysis** (`backend/ast_analysis/`) — clones a component, runs **tree-sitter** (C/C++/Lua) to build a symbol index stored in SQLite + a source snapshot on disk; the agent queries it via the source tools.
+- **Observability** (`backend/observability/`) — Langfuse client with OpenTelemetry-style auto-nesting.
+
+**Note:** `README.md` documents the full system (startup incl. Langfuse, config, API surface); `docs/agent-execution-flow.md` details the ReAct agent end-to-end. Trust the code over any doc when they disagree.
 
 ## Commands
 
@@ -50,7 +60,15 @@ Configuration lives in `backend/.env` (gitignored). It is read by a hand-rolled 
 - **`prompts/` — modular prompts.** Each prompt is a `PromptTemplate` (`${var}` substitution via `string.Template`, zero deps). `system.build_system_prompt()` injects live dataset stats. To add provider-specific logic, add a module here, not in the agent.
 - **`context.py`** trims history to `max_history` (default 40) before sending to the LLM.
 - **`session.py`** — one JSON file per session under `backend/data/sessions/`. Stores full message history (incl. tool calls/results) for session restore.
-- **`dataset.py`** — thin typed wrapper over parsed entries + summary; passed to every tool.
+- **`dataset.py`** — thin typed wrapper over parsed entries + summary; passed to every tool. Carries `user_id` (injected by `/api/chat`) so the source tools can scope AST queries to the logged-in user.
+
+### Other backend subsystems (per-user isolated)
+- **`auth/`** — user auth (register/login/me/logout). Tokens + users in SQLite (`backend/data/users.db`). `get_current_user` is the `Depends` guard on every business route; it yields `{"id", "username"}`, and `user["id"]` is the isolation key threaded into sessions, datasets, AST queries, and `LogDataset.user_id`.
+- **`ast_analysis/`** — tree-sitter source analysis (router prefix `/api/ast`). `POST /api/ast/analyze` clones a component repo, parses C/C++/Lua into a symbol table in `ast.db`, and keeps a source snapshot under `backend/data/source/<user_id>/<component>/`. `db.find_function_at_line` / `find_symbols_by_name` power the agent's source tools. Must run under `backend/venv` — tree-sitter wheels only resolve there.
+- **`db.py`** — component registry (SQLite, `backend/data/components.db`). CRUD for component name / git_url / branch; the `enabled` flag is set by the AST pipeline, not by the user.
+- **`observability/`** is documented in its own section below.
+
+**Isolation invariant:** every `list`/`get`/`delete` on sessions, datasets, components, and AST data accepts a `user_id` and treats "not yours" identically to "doesn't exist" (404 / empty / `False`), so other users' data existence is never leaked. New per-user stores must follow the same pattern.
 
 ### Frontend (`frontend/src/`)
 - **`App.tsx` holds all global state** with hooks (no state library): current `summary`, `activeDatasetId`, `filters`, session list, `activeSessionId`. Log entries are **not** held in `App` — `LogTable` paginates them itself via `fetchEntries` (infinite scroll). Three dataset-activation paths (upload / session-switch / restore) all converge on one activation routine.
@@ -62,7 +80,7 @@ Optional Langfuse v4 tracing, auto-disabled when `LANGFUSE_ENABLED != true`. Use
 
 ## Conventions for changes
 
-- **Adding a tool:** define an `async def` in `tools/log_tools.py` with `(dataset: LogDataset, ...params)`, decorate with `@ToolRegistry.register`. It auto-appears in the LLM's tool list and agent loop — no other wiring.
+- **Adding a tool:** define an `async def` in `tools/log_tools.py` (log analysis) or `tools/source_tools.py` (AST source retrieval) with `(dataset: LogDataset, ...params)`, decorate with `@ToolRegistry.register`. It auto-appears in the LLM's tool list and agent loop — no other wiring. `tools/__init__.py` must import the module (it already imports both). Source tools read `dataset.user_id` to scope AST queries.
 - **Adding an LLM provider:** add an adapter under `llm/` implementing `BaseLLMAdapter`, then add a branch in `factory.create_llm`.
 - **Persistence:** always use `atomic_write_json` (defined in `main.py`) for dataset/session writes. Blocking CPU/IO work (parsing, file reads in paginated endpoints) goes through `asyncio.to_thread` to avoid blocking the event loop.
 - **SSE streaming:** SSE event payloads are defined as discriminated unions in `types/log.ts` (`StreamEvent` for chat, `ParseStreamEvent` for upload) — keep these two **separate**; merging them creates unreachable `switch` branches on both sides.

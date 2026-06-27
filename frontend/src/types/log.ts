@@ -70,12 +70,19 @@ export interface ChatRequest {
 /** 聊天响应 */
 export interface ChatResponse {
   reply: string;
+  /** 整轮对话的 token 消耗（降级模式为 0） */
+  usage?: {
+    input: number;
+    output: number;
+    total: number;
+  };
 }
 
 /** 会话元数据（列表用） */
 export interface SessionInfo {
   session_id: string;
-  dataset_id: string;
+  /** 关联数据集 ID；null = 尚未上传日志的纯对话会话 */
+  dataset_id: string | null;
   created_at: string;
   updated_at: string;
   message_count: number;
@@ -85,7 +92,8 @@ export interface SessionInfo {
 /** 会话详情（含完整消息历史，用于恢复） */
 export interface SessionDetail {
   session_id: string;
-  dataset_id: string;
+  /** 关联数据集 ID；null = 尚未上传日志的纯对话会话 */
+  dataset_id: string | null;
   created_at: string;
   updated_at: string;
   messages: SessionMessage[];
@@ -105,10 +113,14 @@ export interface SessionMessage {
 
 /** SSE 流式事件（聊天用） */
 export interface StreamEvent {
-  type: 'status' | 'tool_progress' | 'delta' | 'done';
+  type: 'status' | 'tool_progress' | 'delta' | 'done' | 'usage';
   text?: string;
   tool?: string;
   status?: string;
+  /** type === 'usage' 时携带：整轮对话的 token 消耗 */
+  input?: number;
+  output?: number;
+  total?: number;
 }
 
 /**

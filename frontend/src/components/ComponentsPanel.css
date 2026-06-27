@@ -556,7 +556,6 @@
   border-color: var(--border-subtle);
 }
 
-.ast-badge.removed,
 .ast-badge.error {
   color: var(--accent-alert);
   background: rgba(255, 69, 58, 0.1);

@@ -1,15 +1,17 @@
 """
 AST 分析编排：增量算法 + SSE 流
 
-核心算法（增量分析，避免重复克隆未变更组件）：
+核心算法（纯增量 upsert —— 只更新本次选中组件，不删除未选中组件）：
 
     S_new = 本次选择且在组件注册表中存在的组件集合
     S_old = 该用户上一次已持久化的组件集合
     to_add    = S_new - S_old       # 全新克隆 + 解析
-    to_remove = S_old - S_new       # 直接删除
     to_check  = S_new & S_old       # ls-remote 比对 commit：
                                       相同 → 复用旧数据（unchanged）
                                       不同 → 重新克隆解析（updated）
+
+注意：未选中组件（S_old - S_new）保持不动——删除是显式操作，由
+「删除分析」(DELETE /api/ast/components/{name}) 负责，不在 analyze 流程里。
 
 成功组件在一次事务内整体落盘；失败组件保持既有数据不动，绝不误删。
 
@@ -61,29 +63,25 @@ async def analyze_stream(user_id: int, selected_names: list[str]):
         c["component"] for c in await asyncio.to_thread(db.list_user_components, user_id)
     }
     to_add = S_new - S_old
-    to_remove = S_old - S_new
     to_check = S_new & S_old
+    # 注：S_old - S_new（本次未选中的组件）刻意不处理——analyze 只增量 upsert
+    # 选中组件，绝不删除既有组件。删除走显式的「删除分析」端点。
 
     yield {
         "type": "plan",
         "added": sorted(to_add),
-        "removed": sorted(to_remove),
         "check": sorted(to_check),
         "invalid": sorted(invalid),
     }
 
-    # 2) 收集要落盘的结果 / 要删除的组件
+    # 2) 收集要落盘的结果
     collected: dict[str, dict] = {}   # component -> 持久化载荷
-    to_delete: list[str] = list(to_remove)
     # 本次分析后「已分析」的组件名集合（added/updated/unchanged 成功项），
     # 用于回写组件注册表 enabled=True；失败项不入列，保持原 enabled。
     analyzed_ok: set[str] = set()
 
     # 计数
-    counts = {"added": 0, "updated": 0, "unchanged": 0, "error": 0, "removed": 0}
-
-    for c in sorted(to_remove):
-        yield {"type": "progress", "stage": "removing", "component": c}
+    counts = {"added": 0, "updated": 0, "unchanged": 0, "error": 0}
 
     for c in sorted(to_add | to_check):
         git_url, branch = registry[c]
@@ -175,12 +173,10 @@ async def analyze_stream(user_id: int, selected_names: list[str]):
                 "error": str(e),
             }
 
-    counts["removed"] = len(to_delete)
-
-    # 3) 持久化（一次提交：删除 + 替换 + meta + 维护注册表 enabled）
-    if collected or to_delete or analyzed_ok:
+    # 3) 持久化（一次提交：替换成功项 + meta + 维护注册表 enabled）
+    if collected or analyzed_ok:
         await asyncio.to_thread(
-            _persist, user_id, collected, to_delete, analyzed_ok, _now_iso()
+            _persist, user_id, collected, analyzed_ok, _now_iso()
         )
 
     # 4) 汇总
@@ -195,7 +191,6 @@ async def analyze_stream(user_id: int, selected_names: list[str]):
         "type": "summary",
         "stats": {
             "added": counts["added"],
-            "removed": counts["removed"],
             "updated": counts["updated"],
             "unchanged": counts["unchanged"],
             "error": counts["error"],
@@ -255,23 +250,18 @@ def _strip_git(dest: str) -> None:
 def _persist(
     user_id: int,
     collected: dict[str, dict],
-    to_delete: list[str],
     analyzed_ok: set[str],
     analyzed_at: str,
 ) -> None:
     """
-    一次性落盘：删除移除项 + 替换成功项 + 更新 meta + 维护组件注册表 enabled。
+    一次性落盘：替换成功项 + 更新 meta + 维护组件注册表 enabled。
 
-    注意：失败组件不在 collected / to_delete / analyzed_ok 中，因此其既有
-    数据与 enabled 均保持不变。
+    注意：analyze 不删除任何组件——失败组件不在 collected / analyzed_ok 中，
+    因此其既有数据与 enabled 均保持不变；未选中组件更不会被触碰。
+    删除走显式的「删除分析」端点（db.delete_component）。
     """
     import db as component_db
 
-    for c in to_delete:
-        db.delete_component(user_id, c)
-        # 同步删除源码快照目录（与 ast.db 行同生命周期）
-        if _is_safe_component_name(c):
-            shutil.rmtree(_component_source_dir(user_id, c), ignore_errors=True)
     for c, payload in collected.items():
         db.replace_component(
             user_id,
@@ -282,10 +272,8 @@ def _persist(
             analyzed_at,
             payload["files"],
         )
-    # 维护组件注册表 enabled（= 已分析）：成功项置 True，移除项置 False。
+    # 维护组件注册表 enabled（= 已分析）：成功项置 True。
     # set_enabled 在组件已被用户从注册表删除时静默忽略，不报错。
     for c in analyzed_ok:
         component_db.set_enabled(user_id, c, True)
-    for c in to_delete:
-        component_db.set_enabled(user_id, c, False)
     db.set_last_analyzed(user_id, analyzed_at)

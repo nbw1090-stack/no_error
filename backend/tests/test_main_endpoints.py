@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from conftest import FakeLLMAdapter, create_session
+from conftest import FakeLLMAdapter, create_session, create_blank_session
 
 
 APP_ERR = "2025-07-24 11:00:00.000000 pcie_device ERROR: f.lua(1): boom"
@@ -267,6 +267,101 @@ def test_user_data_isolated_between_users(client, authed, seed_dataset, sample_e
 
 
 # ============================================================
+# 空数据集会话（纯对话）：创建 / 绑定升级 / 直接对话
+# ============================================================
+
+def test_create_blank_session(client, authed):
+    """不携带 dataset_id 即可创建空数据集会话，dataset_id 为 None。"""
+    sid = create_blank_session(client, authed["headers"])
+    detail = client.get(f"/api/sessions/{sid}", headers=authed["headers"]).json()
+    assert detail["dataset_id"] is None
+    # 列表里也带 dataset_id=None
+    listing = client.get("/api/sessions", headers=authed["headers"]).json()["sessions"]
+    assert any(s["session_id"] == sid and s["dataset_id"] is None for s in listing)
+
+
+def test_link_dataset_upgrades_session(client, authed, seed_dataset, sample_entries, sample_summary):
+    """PUT /api/sessions/{id}/dataset 把数据集绑定到空数据集会话，详情随之更新。"""
+    sid = create_blank_session(client, authed["headers"])
+    did = seed_dataset(sample_entries, sample_summary, authed["user_id"])
+
+    resp = client.put(
+        f"/api/sessions/{sid}/dataset",
+        json={"dataset_id": did},
+        headers=authed["headers"],
+    )
+    assert resp.status_code == 200
+    assert resp.json()["dataset_id"] == did
+
+    detail = client.get(f"/api/sessions/{sid}", headers=authed["headers"]).json()
+    assert detail["dataset_id"] == did
+
+
+def test_link_dataset_404_when_dataset_unowned(client, authed, seed_dataset, sample_entries, sample_summary):
+    """绑定他人数据集到自己的会话 → 数据集归属校验失败，404。"""
+    bob = _register(client, "bob", "bbb222")
+    sid = create_blank_session(client, authed["headers"])
+    bob_did = seed_dataset(sample_entries, sample_summary, bob["user_id"])
+
+    resp = client.put(
+        f"/api/sessions/{sid}/dataset",
+        json={"dataset_id": bob_did},
+        headers=authed["headers"],
+    )
+    assert resp.status_code == 404
+    # 会话仍是空数据集会话（未升级）
+    detail = client.get(f"/api/sessions/{sid}", headers=authed["headers"]).json()
+    assert detail["dataset_id"] is None
+
+
+def test_link_dataset_404_when_session_unowned(client, authed, seed_dataset, sample_entries, sample_summary):
+    """他人不能把数据集绑定到我的会话 → 404，且不泄漏会话存在性。"""
+    bob = _register(client, "bob", "bbb222")
+    sid = create_blank_session(client, authed["headers"])
+    did = seed_dataset(sample_entries, sample_summary, authed["user_id"])
+
+    resp = client.put(
+        f"/api/sessions/{sid}/dataset",
+        json={"dataset_id": did},
+        headers=bob["headers"],
+    )
+    assert resp.status_code == 404
+    # 我的会话未受影响
+    detail = client.get(f"/api/sessions/{sid}", headers=authed["headers"]).json()
+    assert detail["dataset_id"] is None
+
+
+def test_chat_blank_session_fallback(client, authed, tmp_data, monkeypatch):
+    """空数据集会话也能对话（降级模式走 _generate_reply 的 None-summary 分支，不 404）。"""
+    monkeypatch.setattr(tmp_data["main"], "agent", None)
+    sid = create_blank_session(client, authed["headers"])
+
+    resp = client.post(
+        "/api/chat",
+        json={"message": "常见的 BMC 错误有哪些？", "session_id": sid},
+        headers=authed["headers"],
+    )
+    assert resp.status_code == 200
+    assert resp.json()["reply"]  # 非空通用回复
+
+
+def test_chat_stream_blank_session_fallback(client, authed, tmp_data, monkeypatch):
+    """空数据集会话的流式对话也能跑通（降级模式逐词输出，不 404）。"""
+    monkeypatch.setattr(tmp_data["main"], "agent", None)
+    sid = create_blank_session(client, authed["headers"])
+
+    with client.stream(
+        "POST",
+        "/api/chat/stream",
+        json={"message": "hi", "session_id": sid},
+        headers=authed["headers"],
+    ) as resp:
+        assert resp.status_code == 200
+        body = b"".join(resp.iter_bytes()).decode("utf-8")
+    assert "done" in body
+
+
+# ============================================================
 # /api/chat 鉴权
 # ============================================================
 
@@ -390,6 +485,30 @@ def test_chat_agent_mode_uses_fake_llm(client, authed, seed_dataset, sample_entr
     assert resp.status_code == 200
     assert resp.json()["reply"] == "智能回复"
     assert len(fake_agent.llm.calls) == 2  # 工具一轮 + 最终一轮
+
+
+def test_chat_agent_mode_blank_session(client, authed, tmp_data, monkeypatch):
+    """空数据集会话：Agent 模式下不提供任何工具，LLM 直接给出通用回复（无 tool_calls）。"""
+    from agent.core import Agent
+
+    main = tmp_data["main"]
+    # 单轮即最终回复（tool_schemas 为空，不会出现工具调用）
+    fake_agent = Agent(
+        llm=FakeLLMAdapter(["通用 BMC 问答回复"]),
+        session_manager=main.session_manager,
+        max_iterations=5,
+    )
+    monkeypatch.setattr(main, "agent", fake_agent)
+
+    sid = create_blank_session(client, authed["headers"])
+    resp = client.post(
+        "/api/chat",
+        json={"message": "常见的 BMC 错误有哪些？", "session_id": sid},
+        headers=authed["headers"],
+    )
+    assert resp.status_code == 200
+    assert resp.json()["reply"] == "通用 BMC 问答回复"
+    assert len(fake_agent.llm.calls) == 1  # 单轮，无工具调用
 
 
 def test_chat_agent_run_failure_500(client, authed, seed_dataset, sample_entries, sample_summary, tmp_data, monkeypatch):

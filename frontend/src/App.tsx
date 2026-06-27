@@ -14,6 +14,7 @@ import { useState, useEffect, useRef } from 'react';
 import {
   checkHealth,
   createSession,
+  linkDatasetToSession,
   getSession,
   listSessions,
   deleteSession,
@@ -144,7 +145,13 @@ export default function App() {
       const sessionDetail = await getSession(sessionId);
       // 竞态检查：忽略非最新请求的结果
       if (requestId !== selectRequestSeq.current) return;
-      await activateDataset(sessionDetail.dataset_id);
+      // 纯对话会话（dataset_id 为空）：回到「上传 + 对话」视图，不激活数据集
+      if (sessionDetail.dataset_id) {
+        await activateDataset(sessionDetail.dataset_id);
+      } else {
+        setActiveDatasetId(null);
+        setSummary(null);
+      }
       if (requestId !== selectRequestSeq.current) return;
       setPreloadedMessages(sessionDetail.messages);
     } catch (e) {
@@ -155,8 +162,45 @@ export default function App() {
     }
   }
 
-  /** 开始新会话：清空右侧，显示上传区域 */
-  function handleNewSession() {
+  /**
+   * 创建一个空数据集会话（纯对话）并设为活跃。
+   *
+   * 用于「新会话」按钮与首次落地（无可恢复会话时）：使新会话页立即显示
+   * 「上传区 + 对话窗口」，用户可不上传直接提问。返回新建的 session_id。
+   */
+  async function startBlankSession(): Promise<string | null> {
+    try {
+      const session = await createSession(null);
+      setActiveSessionId(session.session_id);
+      setActiveDatasetId(null);
+      setSummary(null);
+      setPreloadedMessages([]); // 新会话无历史消息
+      setError(null);
+      localStorage.setItem(SESSION_STORAGE_KEY, session.session_id);
+
+      const newSessionInfo: SessionInfo = {
+        session_id: session.session_id,
+        dataset_id: session.dataset_id,
+        created_at: session.created_at,
+        updated_at: session.created_at,
+        message_count: 0,
+        title: '',
+      };
+      // 去重后置顶（避免重复点击「新会话」造成列表重复）
+      setSessions((prev) => [
+        newSessionInfo,
+        ...prev.filter((s) => s.session_id !== session.session_id),
+      ]);
+      return session.session_id;
+    } catch (e) {
+      console.error('Failed to create blank session:', e);
+      setError('创建会话失败，请重试。');
+      return null;
+    }
+  }
+
+  /** 开始新会话：清空右侧 → 创建空数据集会话 → 显示「上传 + 对话」 */
+  async function handleNewSession() {
     parseAbortRef.current?.abort();
     setParseStream(null);
     setSummary(null);
@@ -166,6 +210,7 @@ export default function App() {
     setFilters({ component: '', level: 'ALL', search: '' });
     setPreloadedMessages(undefined);
     localStorage.removeItem(SESSION_STORAGE_KEY);
+    await startBlankSession();
   }
 
   /**
@@ -263,14 +308,33 @@ export default function App() {
             setParseStream((s) => (s ? { ...s, stage: ev.stage } : s));
             break;
 
-          case 'summary':
-            // summary 已就绪 = 后端已原子落盘 → 立即激活数据集（渲染 KPI/筛选/StatsPanel），
-            // 异步创建会话；日志条目由 LogTable 按需分页加载。
-            void activateDataset(ev.dataset_id, ev.summary);
-            void ensureSession(ev.dataset_id);
+          case 'summary': {
+            // summary 已就绪 = 后端已原子落盘 → 立即激活数据集（渲染 KPI/筛选/StatsPanel）。
+            const dsId = ev.dataset_id;
+            // 若当前是空数据集会话（先对话后上传）：把数据集绑定到当前会话，
+            // 保留聊天历史、升级为带工具的会话；否则按原流程为该数据集新建会话。
+            if (activeSessionId && !activeDatasetId) {
+              try {
+                await linkDatasetToSession(activeSessionId, dsId);
+                setSessions((prev) =>
+                  prev.map((s) =>
+                    s.session_id === activeSessionId
+                      ? { ...s, dataset_id: dsId }
+                      : s
+                  )
+                );
+              } catch (e) {
+                console.error('Failed to link dataset to session:', e);
+                setError('绑定数据集到会话失败，请重试。');
+              }
+            } else {
+              void ensureSession(dsId);
+            }
+            void activateDataset(dsId, ev.summary);
             // 实质完成：数据集已就绪，LogTable 可立即拉首屏
             setParseStream(null);
             break;
+          }
 
           case 'done':
             break;
@@ -376,16 +440,29 @@ export default function App() {
 
       // 2. 尝试恢复上次活跃会话
       const savedSessionId = localStorage.getItem(SESSION_STORAGE_KEY);
+      let restored = false;
       if (savedSessionId) {
         try {
           const session = await getSession(savedSessionId);
           setActiveSessionId(savedSessionId);
           setPreloadedMessages(session.messages);
-          await activateDataset(session.dataset_id);
+          if (session.dataset_id) {
+            await activateDataset(session.dataset_id);
+          } else {
+            // 纯对话会话：回到「上传 + 对话」视图，不激活数据集
+            setActiveDatasetId(null);
+            setSummary(null);
+          }
+          restored = true;
         } catch {
           // 会话或数据集已过期/删除，清除记录
           localStorage.removeItem(SESSION_STORAGE_KEY);
         }
+      }
+
+      // 3. 无可恢复会话：创建空数据集会话，使落地页即显示「上传 + 对话」
+      if (!restored) {
+        await startBlankSession();
       }
 
       setSessionRestored(true);
@@ -537,17 +614,19 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Agent 对话窗口 */}
-                {activeSessionId && sessionRestored && (
-                  <div className="chat-section">
-                    <ChatPanel
-                      key={activeSessionId}
-                      sessionId={activeSessionId}
-                      initialMessages={preloadedMessages}
-                    />
-                  </div>
-                )}
               </>
+            )}
+
+            {/* Agent 对话窗口：纯对话会话时位于上传区下方；有数据集时位于仪表盘下方 */}
+            {activeSessionId && sessionRestored && (
+              <div className="chat-section" key="chat-panel">
+                <ChatPanel
+                  key={activeSessionId}
+                  sessionId={activeSessionId}
+                  initialMessages={preloadedMessages}
+                  hasDataset={!!activeDatasetId}
+                />
+              </div>
             )}
           </div>
         </div>

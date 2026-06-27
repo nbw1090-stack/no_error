@@ -137,6 +137,7 @@ class OpenAIAdapter(BaseLLMAdapter):
             "role": "assistant",
             "content": choice.message.content,
             "tool_calls": tool_calls,
+            "usage": usage_details,
         }
 
     async def chat_stream(
@@ -199,14 +200,18 @@ class OpenAIAdapter(BaseLLMAdapter):
             try:
                 stream = await self.client.chat.completions.create(**kwargs)
                 async for chunk in stream:
-                    # 末尾 usage chunk（无 choices）
+                    # usage 的位置因供应商而异：OpenAI 用独立的空-choices chunk，
+                    # 而 DeepSeek 等把 usage 放在携带 finish_reason 的末 chunk（choices 非空）。
+                    # 因此对每个 chunk 都检查 usage，避免漏掉。
+                    if chunk.usage:
+                        usage_details = {
+                            "input": chunk.usage.prompt_tokens or 0,
+                            "output": chunk.usage.completion_tokens or 0,
+                            "total": chunk.usage.total_tokens or 0,
+                        }
+
+                    # 空-choices chunk（OpenAI 风格的纯 usage chunk）：已取 usage，跳过后续
                     if not chunk.choices:
-                        if chunk.usage:
-                            usage_details = {
-                                "input": chunk.usage.prompt_tokens or 0,
-                                "output": chunk.usage.completion_tokens or 0,
-                                "total": chunk.usage.total_tokens or 0,
-                            }
                         continue
 
                     delta = chunk.choices[0].delta
@@ -275,6 +280,7 @@ class OpenAIAdapter(BaseLLMAdapter):
                 "finish_reason": finish_reason or "stop",
                 "content": full_content,
                 "tool_calls": tool_calls,
+                "usage": usage_details,
             }
 
 

@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import uuid
+from typing import Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,6 +40,7 @@ import db as component_db
 # 用户认证 + AST 分析（独立模块，各自管理自己的 SQLite DB 与 APIRouter）
 import auth
 import ast_analysis
+from ast_analysis import db as ast_db
 from auth.dependency import get_current_user
 
 # 触发工具注册（导入即注册）
@@ -137,6 +139,11 @@ class ChatRequest(BaseModel):
 
 class CreateSessionRequest(BaseModel):
     """创建会话请求"""
+    dataset_id: Optional[str] = None  # 为空 = 尚未上传日志的纯对话会话
+
+
+class LinkDatasetRequest(BaseModel):
+    """把数据集绑定到已有会话（先对话后上传的升级场景）"""
     dataset_id: str
 
 
@@ -249,6 +256,8 @@ async def parse_log(
             "filename": file.filename,
             "content_type": file.content_type,
         },
+        user_id=str(user["id"]),
+        trace_metadata={"username": user["username"]},
     ) as parse_trace:
         try:
             # ---- 1. 读取上传文件（内存处理，不落盘）----
@@ -358,6 +367,8 @@ async def parse_log_stream(
                 "filename": file.filename,
                 "content_type": file.content_type,
             },
+            user_id=str(owner_id),
+            trace_metadata={"username": owner_name},
         ) as parse_trace:
             try:
                 yield sse({"type": "progress", "stage": "extracting"})
@@ -459,45 +470,60 @@ async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # ---- 加载数据集（会话归属已校验，其 dataset 必属同一用户）----
-    dataset_path = os.path.join(DATASETS_DIR, f"{session.dataset_id}.json")
-    if not os.path.exists(dataset_path):
-        raise HTTPException(status_code=404, detail="Dataset not found")
+    # ---- 加载数据集（纯对话会话 dataset_id 为空 → dataset=None，走通用问答）----
+    dataset: Optional[LogDataset] = None
+    if session.dataset_id:
+        dataset_path = os.path.join(DATASETS_DIR, f"{session.dataset_id}.json")
+        if not os.path.exists(dataset_path):
+            raise HTTPException(status_code=404, detail="Dataset not found")
 
-    with open(dataset_path) as f:
-        data = json.load(f)
+        with open(dataset_path) as f:
+            data = json.load(f)
 
-    dataset = LogDataset(
-        entries=data["entries"],
-        summary=_ensure_summary_complete(data["summary"], data["entries"]),
-        user_id=user["id"],
-    )
+        dataset = LogDataset(
+            entries=data["entries"],
+            summary=_ensure_summary_complete(data["summary"], data["entries"]),
+            user_id=user["id"],
+        )
 
     tracer = get_client()
 
     # ---- Agent 模式 ----
     if agent is not None:
+        base_metadata = {
+            "dataset_entries": len(dataset.entries) if dataset else 0,
+            "llm_model": config.llm.model,
+            "llm_provider": config.llm.provider,
+        }
         with tracer.observation(
             name="chat",
             session_id=req.session_id,
+            user_id=str(user["id"]),
+            trace_metadata={"username": user["username"]},
             input={
                 "message": message,
                 "session_id": req.session_id,
                 "dataset_id": session.dataset_id,
             },
-            metadata={
-                "dataset_entries": len(dataset.entries),
-                "llm_model": config.llm.model,
-                "llm_provider": config.llm.provider,
-            },
+            metadata=base_metadata,
         ) as trace:
+            usage: dict = {}
             try:
                 reply = await agent.run(
                     session_id=req.session_id,
                     user_message=message,
                     dataset=dataset,
+                    usage=usage,
                 )
-                trace.update(output={"reply": reply[:2000]})
+                trace.update(
+                    output={"reply": reply[:2000]},
+                    metadata={
+                        **base_metadata,
+                        "total_input_tokens": usage.get("input", 0),
+                        "total_output_tokens": usage.get("output", 0),
+                        "total_tokens": usage.get("total", 0),
+                    },
+                )
             except Exception as e:
                 logger.exception("Agent run failed")
                 trace.update(
@@ -511,7 +537,14 @@ async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
 
         # 确保 trace 数据立即发送到 Langfuse
         tracer.flush()
-        return {"reply": reply}
+        return {
+            "reply": reply,
+            "usage": {
+                "input": usage.get("input", 0),
+                "output": usage.get("output", 0),
+                "total": usage.get("total", 0),
+            },
+        }
 
     # ---- 降级模式：规则匹配 ----
     logger.info("Agent unavailable, using fallback rule-based reply")
@@ -519,6 +552,8 @@ async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
     with tracer.observation(
         name="chat-fallback",
         session_id=req.session_id,
+        user_id=str(user["id"]),
+        trace_metadata={"username": user["username"]},
         input={
             "message": message,
             "session_id": req.session_id,
@@ -526,10 +561,10 @@ async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
         },
         metadata={
             "mode": "rule_based",
-            "dataset_entries": len(dataset.entries),
+            "dataset_entries": len(dataset.entries) if dataset else 0,
         },
     ) as trace:
-        reply = _generate_reply(message, dataset.summary)
+        reply = _generate_reply(message, dataset.summary if dataset else None)
         # 将消息记录到会话
         session_manager.add_message(
             req.session_id, {"role": "user", "content": message}
@@ -540,7 +575,10 @@ async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
         trace.update(output={"reply": reply[:2000]})
 
     tracer.flush()
-    return {"reply": reply}
+    return {
+        "reply": reply,
+        "usage": {"input": 0, "output": 0, "total": 0},
+    }
 
 
 # ============================================================
@@ -562,19 +600,21 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(get_current_user)):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # ---- 加载数据集（会话归属已校验，其 dataset 必属同一用户）----
-    dataset_path = os.path.join(DATASETS_DIR, f"{session.dataset_id}.json")
-    if not os.path.exists(dataset_path):
-        raise HTTPException(status_code=404, detail="Dataset not found")
+    # ---- 加载数据集（纯对话会话 dataset_id 为空 → dataset=None，走通用问答）----
+    dataset: Optional[LogDataset] = None
+    if session.dataset_id:
+        dataset_path = os.path.join(DATASETS_DIR, f"{session.dataset_id}.json")
+        if not os.path.exists(dataset_path):
+            raise HTTPException(status_code=404, detail="Dataset not found")
 
-    with open(dataset_path) as f:
-        data = json.load(f)
+        with open(dataset_path) as f:
+            data = json.load(f)
 
-    dataset = LogDataset(
-        entries=data["entries"],
-        summary=_ensure_summary_complete(data["summary"], data["entries"]),
-        user_id=user["id"],
-    )
+        dataset = LogDataset(
+            entries=data["entries"],
+            summary=_ensure_summary_complete(data["summary"], data["entries"]),
+            user_id=user["id"],
+        )
 
     tracer = get_client()
 
@@ -586,34 +626,50 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(get_current_user)):
         try:
             # ---- Agent 流式模式 ----
             if agent is not None:
+                base_metadata = {
+                    "dataset_entries": len(dataset.entries) if dataset else 0,
+                    "llm_model": config.llm.model,
+                    "llm_provider": config.llm.provider,
+                }
                 with tracer.observation(
                     name="chat-stream",
                     session_id=req.session_id,
+                    user_id=str(user["id"]),
+                    trace_metadata={"username": user["username"]},
                     input={
                         "message": message,
                         "session_id": req.session_id,
                         "dataset_id": session.dataset_id,
                     },
-                    metadata={
-                        "dataset_entries": len(dataset.entries),
-                        "llm_model": config.llm.model,
-                        "llm_provider": config.llm.provider,
-                    },
+                    metadata=base_metadata,
                 ) as trace:
+                    usage_total: dict = {}
                     async for event in agent.run_stream(
                         session_id=req.session_id,
                         user_message=message,
                         dataset=dataset,
                     ):
+                        # usage 事件由 Agent 在流末尾发出：捕获整轮 token 总量，
+                        # 同时照常转发给前端展示
+                        if event.get("type") == "usage":
+                            usage_total = event
                         yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
-                    trace.update(output={"status": "stream_complete"})
+                    trace.update(
+                        output={"status": "stream_complete"},
+                        metadata={
+                            **base_metadata,
+                            "total_input_tokens": usage_total.get("input", 0),
+                            "total_output_tokens": usage_total.get("output", 0),
+                            "total_tokens": usage_total.get("total", 0),
+                        },
+                    )
             else:
                 # ---- 降级模式：规则匹配 ----
                 logger.info(
                     "Agent unavailable, using fallback rule-based reply [stream]"
                 )
-                reply = _generate_reply(message, dataset.summary)
+                reply = _generate_reply(message, dataset.summary if dataset else None)
                 session_manager.add_message(
                     req.session_id,
                     {"role": "user", "content": message},
@@ -651,12 +707,20 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(get_current_user)):
     )
 
 
-def _generate_reply(message: str, summary: dict) -> str:
+def _generate_reply(message: str, summary: Optional[dict] = None) -> str:
     """
     降级模式：基于规则的回复生成。
 
     当 LLM 不可用时使用此函数提供基本交互能力。
     """
+    # 纯对话会话（无数据集）且 LLM 不可用：仅给通用引导
+    if summary is None:
+        return (
+            "收到你的问题。当前为规则匹配模式（未配置 LLM），且本会话尚未上传日志，"
+            "暂无法进行日志数据统计。配置 LLM（设置 `LLM_API_KEY`）后可直接进行 BMC "
+            "智能问答；上传 dump_info.tar.gz 后还能基于你的真实日志做深度分析。"
+        )
+
     msg_lower = message.lower()
     total = summary.get("totalLines", 0)
     errors = summary.get("errorCount", 0)
@@ -672,7 +736,7 @@ def _generate_reply(message: str, summary: dict) -> str:
             f"- 警告 (WARNING)：**{warnings:,}** 条\n"
             f"- 涉及组件：**{len(components)}** 个\n"
             f"- 主要组件：{', '.join(components[:5])}\n\n"
-            f"错误占比 **{errors / total * 100:.1f}%**（基于规则匹配，"
+            f"错误占比 **{errors / (total or 1) * 100:.1f}%**（基于规则匹配，"
             f"配置 LLM 后可获得更智能的分析）。"
         )
 
@@ -872,10 +936,13 @@ async def create_session(
     """
     创建新的聊天会话（归属当前登录用户）。
 
-    校验数据集存在且属于该用户，再创建会话；不同用户、不同会话之间隔离。
+    携带 dataset_id 时：校验数据集存在且属于该用户，再创建绑定会话。
+    不携带 dataset_id 时：创建空数据集的纯对话会话（用户可先直接提问，
+    之后上传日志再通过 PUT /api/sessions/{id}/dataset 绑定升级）。
     """
-    # 验证数据集存在且归属当前用户（非属主统一 404）
-    _load_dataset_owned(req.dataset_id, user["id"])
+    # 验证数据集存在且归属当前用户（非属主统一 404）；纯对话会话跳过此校验
+    if req.dataset_id is not None:
+        _load_dataset_owned(req.dataset_id, user["id"])
 
     session = session_manager.create(
         req.dataset_id, user["id"], user["username"]
@@ -886,6 +953,27 @@ async def create_session(
         "created_at": session.created_at,
         "message_count": 0,
     }
+
+
+@app.put("/api/sessions/{session_id}/dataset")
+async def link_session_dataset(
+    session_id: str,
+    req: LinkDatasetRequest,
+    user: dict = Depends(get_current_user),
+):
+    """
+    把数据集绑定到已有会话（先对话后上传的升级场景）。
+
+    校验：会话与数据集均归属当前用户（任一不符统一 404，不泄漏存在性）。
+    绑定后该会话从「纯对话」升级为「带日志数据集」，后续对话自动获得分析工具。
+    """
+    # 校验目标数据集存在且归属当前用户
+    _load_dataset_owned(req.dataset_id, user["id"])
+    # 绑定（link_dataset 内部做会话归属校验，失败返回 None → 404）
+    session = session_manager.link_dataset(session_id, req.dataset_id, user["id"])
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"session_id": session.session_id, "dataset_id": session.dataset_id}
 
 
 @app.get("/api/sessions")
@@ -986,13 +1074,19 @@ async def update_component(
 async def delete_component(
     name: str, user: dict = Depends(get_current_user)
 ):
-    """删除组件（归属当前用户）；不存在返回 404"""
+    """删除组件（归属当前用户）；不存在返回 404。
+
+    同时清空该组件的 AST 分析数据（ast.db），避免删除后仍残留孤儿分析结果
+    （否则 GET /api/ast/result 会出现「列表已删、结果还在」的不一致）。
+    """
     try:
         await asyncio.to_thread(
             component_db.delete_component, user["id"], name
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Component not found")
+    # 组件已从注册表删除；顺带清空其 AST 分析数据（无则无害，幂等）
+    await asyncio.to_thread(ast_db.delete_component, user["id"], name)
     return {"deleted": True}
 
 

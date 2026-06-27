@@ -6,7 +6,7 @@ AST 分析模块测试
    解析内联的 Lua / C 片段，断言能识别语言、提取符号、不崩。
 2) 端点 + 增量算法测试（git 完全打桩，零网络）：
    - clone_component 用 monkeypatch 替换为「写一份临时源码树 + 返回假 sha」
-   - remote_commit 用 monkeypatch 返回受控 sha，验证 added/unchanged/updated/removed 分支
+   - remote_commit 用 monkeypatch 返回受控 sha，验证 added/unchanged/updated 分支
    - 通过 /api/ast/analyze（SSE）+ /api/ast/result 驱动整条增量流程
 """
 
@@ -200,31 +200,36 @@ def test_analyze_updated_when_commit_differs(authed, stub_clone):
     assert summary["stats"]["updated"] == 1
 
 
-def test_analyze_remove_and_add_swaps_component(authed, stub_clone):
-    # 先有 sensor
+def test_analyze_does_not_remove_unselected(authed, stub_clone):
+    """
+    analyze 是纯增量 upsert：分析 sensor 后再单独分析 hwproxy，
+    sensor 的既有结果与 enabled 必须保留——绝不能因「本次未选中」而被清空。
+    """
+    # 先分析 sensor
     _analyze(authed, ["sensor"])
     assert "sensor" in {
         c["component"] for c in _result(authed).json()["components"]
     }
-    # 换成另一个注册表里的组件（hwproxy 是种子组件）
+
+    # 再单独分析另一个注册表里的组件（hwproxy 是种子组件）
     events = _analyze(authed, ["hwproxy"])
-    types = [e["type"] for e in events]
-    assert "plan" in types
     plan = next(e for e in events if e["type"] == "plan")
-    assert "sensor" in plan["removed"]
     assert "hwproxy" in plan["added"]
+    # plan 不再有 removed 字段（analyze 不删除任何组件）
+    assert "removed" not in plan
 
     added = _component_events(events, "added")
     assert any(e["component"] == "hwproxy" for e in added)
 
-    # result 中 sensor 应已消失，hwproxy 出现
+    # result 中 sensor 与 hwproxy 俱存（未选中组件不被清空）
     data = _result(authed).json()
     comps = {c["component"] for c in data["components"]}
-    assert "sensor" not in comps
+    assert "sensor" in comps
     assert "hwproxy" in comps
+    assert data["stats"]["components"] == 2
 
-    # sensor 被移除 → enabled=False；hwproxy 新增分析 → enabled=True
-    assert _component_enabled(authed, "sensor") is False
+    # sensor 未被触碰 → 仍 enabled=True；hwproxy 新增 → enabled=True
+    assert _component_enabled(authed, "sensor") is True
     assert _component_enabled(authed, "hwproxy") is True
 
 

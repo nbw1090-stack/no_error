@@ -96,7 +96,12 @@ MESSAGES = [{"role": "user", "content": "hi"}]
 async def test_chat_no_tools_normalizes_content():
     adapter, create_mock = _make_adapter(_resp(content="hello"))
     result = await adapter.chat(MESSAGES)
-    assert result == {"role": "assistant", "content": "hello", "tool_calls": None}
+    assert result == {
+        "role": "assistant",
+        "content": "hello",
+        "tool_calls": None,
+        "usage": None,  # 供应商未返回 usage 时为 None
+    }
     kwargs = create_mock.call_args.kwargs
     assert kwargs["model"] == "test-model"
     assert kwargs["messages"] == MESSAGES

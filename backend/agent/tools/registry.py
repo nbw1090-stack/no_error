@@ -39,6 +39,7 @@ class ToolRegistry:
         description: str,
         parameters: dict,
         required: list[str] | None = None,
+        group: str = "log",
     ):
         """
         装饰器：将一个 async 函数注册为工具。
@@ -57,6 +58,7 @@ class ToolRegistry:
                 parameters=parameters,
                 func=func,
                 required=required or [],
+                group=group,
             )
             logger.info("Tool registered: %s", name)
             return func
@@ -64,11 +66,12 @@ class ToolRegistry:
         return decorator
 
     @classmethod
-    def get_schemas(cls) -> list[dict]:
+    def get_schemas(cls, groups: set[str] | None = None) -> list[dict]:
         """
         返回 OpenAI function-calling 格式的工具 schema 列表。
 
-        用于传递给 LLM 的 tools 参数。
+        用于传递给 LLM 的 tools 参数。传入 groups 时只返回指定分组的工具
+        （None = 全部），供 Agent 按需暴露日志工具 / 源码工具。
         """
         return [
             {
@@ -80,12 +83,17 @@ class ToolRegistry:
                 },
             }
             for td in cls._tools.values()
+            if groups is None or td.group in groups
         ]
 
     @classmethod
-    def get_names(cls) -> list[str]:
-        """返回所有已注册工具的名称列表"""
-        return list(cls._tools.keys())
+    def get_names(cls, groups: set[str] | None = None) -> list[str]:
+        """返回已注册工具的名称列表（传入 groups 时只返回指定分组，None=全部）。"""
+        return [
+            name
+            for name, td in cls._tools.items()
+            if groups is None or td.group in groups
+        ]
 
     @classmethod
     async def execute(cls, name: str, arguments: dict, dataset: LogDataset) -> str:

@@ -15,13 +15,12 @@ export type AstAnalyzeEvent =
   | {
       type: 'plan';
       added: string[];
-      removed: string[];
       check: string[];
       invalid: string[];
     }
   | {
       type: 'progress';
-      stage: 'cloning' | 'parsing' | 'removing';
+      stage: 'cloning' | 'parsing';
       component: string;
     }
   | {
@@ -37,7 +36,6 @@ export type AstAnalyzeEvent =
       type: 'summary';
       stats: {
         added: number;
-        removed: number;
         updated: number;
         unchanged: number;
         error: number;

@@ -11,6 +11,7 @@ import uuid
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ class Session:
     """
 
     session_id: str
-    dataset_id: str  # 关联的数据集 ID
+    dataset_id: Optional[str]  # 关联的数据集 ID（None = 尚未上传日志的纯对话会话）
     created_at: str
     updated_at: str
     messages: list[dict] = field(default_factory=list)
@@ -40,9 +41,12 @@ class Session:
 
     @classmethod
     def create(
-        cls, dataset_id: str, user_id: int = 0, username: str = ""
+        cls,
+        dataset_id: Optional[str] = None,
+        user_id: int = 0,
+        username: str = "",
     ) -> "Session":
-        """创建新会话"""
+        """创建新会话（dataset_id 可空：空数据集的纯对话会话）"""
         now = datetime.now(timezone.utc).isoformat()
         return cls(
             session_id=uuid.uuid4().hex[:12],
@@ -76,7 +80,10 @@ class SessionManager:
     # ---- CRUD ----
 
     def create(
-        self, dataset_id: str, user_id: int = 0, username: str = ""
+        self,
+        dataset_id: Optional[str] = None,
+        user_id: int = 0,
+        username: str = "",
     ) -> Session:
         """创建并持久化新会话（归属 user_id / username）"""
         session = Session.create(dataset_id, user_id, username)
@@ -87,6 +94,31 @@ class SessionManager:
             dataset_id,
             user_id,
             username,
+        )
+        return session
+
+    def link_dataset(
+        self, session_id: str, dataset_id: str, user_id: int | None = None
+    ) -> Session | None:
+        """
+        把数据集绑定到已有会话（用于「先对话后上传」的升级场景）。
+
+        会话归属校验失败（不存在 / 非该用户）时返回 None（与 get 一致，
+        不泄漏其他用户的会话存在性）。绑定后落盘，保持 1:1 不变式。
+
+        注意：调用方应自行校验 dataset_id 归属（见 main._load_dataset_owned）。
+        """
+        session = self.get(session_id, user_id)
+        if session is None:
+            return None
+        session.dataset_id = dataset_id
+        session.updated_at = datetime.now(timezone.utc).isoformat()
+        self._save(session)
+        logger.info(
+            "Session linked: %s -> dataset %s (user=%s)",
+            session_id,
+            dataset_id,
+            user_id,
         )
         return session
 

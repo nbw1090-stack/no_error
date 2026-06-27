@@ -15,8 +15,12 @@
  */
 
 import { useState, useRef, useEffect, type KeyboardEvent, type FormEvent } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import rehypeHighlight from 'rehype-highlight';
 import { sendChatMessageStream } from '../api/client';
 import type { ChatMessage, SessionMessage } from '../types/log';
+import 'highlight.js/styles/github-dark.css';
 import './ChatPanel.css';
 
 interface ChatPanelProps {
@@ -24,6 +28,8 @@ interface ChatPanelProps {
   /** 预加载的会话消息（父组件并行请求后传入，避免冗余 fetch）。
    *  undefined = 加载中，[...] = 已就绪 */
   initialMessages?: SessionMessage[];
+  /** 当前会话是否已绑定日志数据集。false = 纯对话模式，空态文案/建议改为通用问答。 */
+  hasDataset?: boolean;
 }
 
 /** 生成唯一消息 ID */
@@ -37,12 +43,20 @@ function formatTime(): string {
   return now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 }
 
-/** 快捷建议 */
-const SUGGESTIONS = [
+/** 快捷建议：有日志数据集时（围绕已上传日志的分析） */
+const SUGGESTIONS_WITH_DATASET = [
   '给我一个概览',
   '有哪些组件出错了',
   '分析一下错误',
   '日志时间跨度',
+];
+
+/** 快捷建议：纯对话模式（尚未上传日志，通用 BMC 问答） */
+const SUGGESTIONS_NO_DATASET = [
+  'BMC 日志分析助手能做什么？',
+  '常见的 BMC 错误有哪些？',
+  '如何解读 framework.log？',
+  '上传日志后能分析什么？',
 ];
 
 /**
@@ -75,12 +89,21 @@ function sessionMessagesToChatMessages(messages: SessionMessage[]): ChatMessage[
   return chatMessages;
 }
 
-export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps) {
+export default function ChatPanel({
+  sessionId,
+  initialMessages,
+  hasDataset = true,
+}: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isThinking, setIsThinking] = useState(false);
   const [isRestoring, setIsRestoring] = useState(true);
   const [toolProgress, setToolProgress] = useState<string | null>(null);
+  const [lastUsage, setLastUsage] = useState<{
+    input: number;
+    output: number;
+    total: number;
+  } | null>(null);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -145,6 +168,7 @@ export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setIsThinking(true);
+    setLastUsage(null); // 清空上一轮的 token 消耗
 
     // 2. 创建占位助手消息（流式内容将逐步填充）
     const placeholderId = genId();
@@ -190,6 +214,21 @@ export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps
             // 流正常结束
             break;
 
+          case 'usage':
+            // 整轮 token 消耗（Agent 在流末尾上报）
+            if (
+              typeof event.input === 'number' &&
+              typeof event.output === 'number' &&
+              typeof event.total === 'number'
+            ) {
+              setLastUsage({
+                input: event.input,
+                output: event.output,
+                total: event.total,
+              });
+            }
+            break;
+
           case 'status':
             // 状态消息可用于未来扩展
             break;
@@ -221,6 +260,14 @@ export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps
         );
       }
     } finally {
+      // 若流式正常结束但占位气泡始终为空（LLM 本轮只产出工具调用、未给最终文本），
+      // 静默将其从消息列表移除，避免空占位残留在状态里。中断/错误分支已写入兜底
+      // 文案，此处按 content 是否为空判断，不会误删这些兜底消息。
+      setMessages((prev) =>
+        prev.filter(
+          (msg) => !(msg.id === placeholderId && msg.content.trim() === ''),
+        ),
+      );
       setIsThinking(false);
       setToolProgress(null);
       abortControllerRef.current = null;
@@ -262,13 +309,14 @@ export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps
     handleSend();
   }
 
-  /** 渲染消息内容（支持简单 Markdown：**bold** 和换行） */
-  function renderContent(content: string) {
-    const withBold = content.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    return { __html: withBold };
-  }
+  // 过滤掉空内容的助手占位气泡：LLM 本轮可能只产出工具调用而未给最终文本，
+  // 此时占位消息 content 仍为空，直接渲染会留下一个空白气泡。统一不展示这类
+  // 消息，对用户无感知（加载态由下方的「思考中」动画单独承担）。
+  const visibleMessages = messages.filter(
+    (msg) => msg.role !== 'assistant' || msg.content.trim() !== '',
+  );
 
-  const hasMessages = messages.length > 0;
+  const hasMessages = visibleMessages.length > 0;
 
   return (
     <div className="chat-panel">
@@ -295,12 +343,30 @@ export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps
         </div>
       ) : hasMessages ? (
         <div className="chat-messages" ref={messagesContainerRef}>
-          {messages.map((msg) => (
+          {visibleMessages.map((msg) => (
             <div key={msg.id} className={`chat-message ${msg.role}`}>
-              <div
-                className="message-content"
-                dangerouslySetInnerHTML={renderContent(msg.content)}
-              />
+              <div className="message-content">
+                {msg.role === 'assistant' ? (
+                  <ReactMarkdown
+                    // remark-gfm：启用 GFM 扩展语法（表格 / 删除线 / 任务列表 / 自动链接）
+                    // —— 否则 LLM 输出的 markdown 表格会按普通文本显示管道符 "|"
+                    remarkPlugins={[remarkGfm]}
+                    rehypePlugins={[rehypeHighlight]}
+                    components={{
+                      // GFM 表格在窄气泡里可能超宽：包一层横向滚动容器，避免撑破气泡
+                      table: ({ node: _node, ...props }) => (
+                        <div className="md-table-wrap">
+                          <table {...props} />
+                        </div>
+                      ),
+                    }}
+                  >
+                    {msg.content}
+                  </ReactMarkdown>
+                ) : (
+                  msg.content
+                )}
+              </div>
               <span className="message-time">{msg.timestamp}</span>
             </div>
           ))}
@@ -324,20 +390,23 @@ export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps
           <div className="chat-empty-icon">🤖</div>
           <h4>BMC 日志分析助手</h4>
           <p>
-            我可以帮你分析已上传的日志数据，包括错误趋势、组件分布和问题排查建议。
-            试试下面的问题，或直接输入你想了解的内容。
+            {hasDataset
+              ? '我可以帮你分析已上传的日志数据，包括错误趋势、组件分布和问题排查建议。试试下面的问题，或直接输入你想了解的内容。'
+              : '我是 BMC 日志分析助手。你可以直接向我提问 BMC 相关问题，也可以上传 dump_info.tar.gz 启用基于真实日志的深度分析。'}
           </p>
           <div className="chat-suggestions">
-            {SUGGESTIONS.map((s) => (
-              <button
-                key={s}
-                className="chat-suggestion"
-                onClick={() => handleSuggestion(s)}
-                disabled={isThinking}
-              >
-                {s}
-              </button>
-            ))}
+            {(hasDataset ? SUGGESTIONS_WITH_DATASET : SUGGESTIONS_NO_DATASET).map(
+              (s) => (
+                <button
+                  key={s}
+                  className="chat-suggestion"
+                  onClick={() => handleSuggestion(s)}
+                  disabled={isThinking}
+                >
+                  {s}
+                </button>
+              )
+            )}
           </div>
         </div>
       )}
@@ -374,6 +443,14 @@ export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps
           </button>
         )}
       </form>
+
+      {/* 上一轮对话的 token 消耗（Agent 在流末尾上报） */}
+      {lastUsage && lastUsage.total > 0 && (
+        <div className="chat-usage">
+          本次消耗 {lastUsage.total} tokens（输入 {lastUsage.input} / 输出{' '}
+          {lastUsage.output}）
+        </div>
+      )}
     </div>
   );
 }

@@ -17,3 +17,4 @@ class ToolDefinition:
     parameters: dict  # JSON Schema 格式的参数定义
     func: Callable  # async callable(dataset: LogDataset, **kwargs) -> Any
     required: list[str] = field(default_factory=list)
+    group: str = "log"  # 工具分组："log"(需日志数据集) / "source"(仅需 user_id)

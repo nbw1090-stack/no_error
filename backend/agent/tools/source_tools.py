@@ -13,9 +13,32 @@ get_function_source：根据日志条目的 (component, file, line)，从该用�
 """
 
 import os
+import re
 
 from agent.tools.registry import ToolRegistry
 from agent.dataset import LogDataset
+
+
+# ============================================================
+# 组件概览(summarize_component)用的入口符号启发式
+# ============================================================
+# 入口符号启发式:匹配「方法名片段」。Lua 形如 mod:method / mod.method,
+# 故先用 _entry_symbol_token 取最后一段再匹配。覆盖 init/new/register/on_*/init_*/*_init。
+_ENTRY_SYMBOL_RE = re.compile(
+    r"^(init|main|start|new|create|open|setup|register|initialize"
+    r"|on_\w+|init_\w+|\w+_init)$",
+    re.IGNORECASE,
+)
+# 源码优先目录前缀:test/gen 多为噪声。无 src//lib/ 时回退到非噪声目录。
+_SOURCE_DIR_PREFIXES = ("src/", "lib/")
+_NOISE_DIR_PREFIXES = ("test/", "tests/", "gen/", "vendor/", "build/")
+
+
+def _entry_symbol_token(name: str) -> str:
+    """取 Lua mod:method / mod.method 的最后一段方法名;无点冒号则原样返回。"""
+    if not name:
+        return ""
+    return re.split(r"[.:]", name)[-1]
 
 
 @ToolRegistry.register(
@@ -50,6 +73,7 @@ from agent.dataset import LogDataset
         },
         "required": ["component", "file", "line"],
     },
+    group="source",
 )
 async def get_function_source(
     dataset: LogDataset,
@@ -125,6 +149,340 @@ async def get_function_source(
     return result
 
 
+@ToolRegistry.register(
+    name="search_symbols",
+    description=(
+        "按函数/符号名称检索某组件的源码，返回匹配的函数体源码（带行号）。"
+        "当用户按名称询问某个函数/方法/类的行为时（如 'init_card 是做什么的'）"
+        "调用，无需提供行号。需先在「组件管理」对相关组件构建源码索引。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "component": {"type": "string", "description": "组件名称"},
+            "name": {
+                "type": "string",
+                "description": "符号名称或其片段（大小写不敏感，子串匹配）",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "最多返回的匹配数，默认 5",
+            },
+            "context_lines": {
+                "type": "integer",
+                "description": "每个函数体前后额外取的上下文行数，默认 3",
+            },
+        },
+        "required": ["component", "name"],
+    },
+    group="source",
+)
+async def search_symbols(
+    dataset: LogDataset,
+    component: str,
+    name: str,
+    limit: int = 5,
+    context_lines: int = 3,
+) -> dict:
+    """按符号名检索源码函数体。"""
+    from ast_analysis import db
+
+    user_id = dataset.user_id
+    if user_id is None:
+        return {"error": "源码索引需登录后可用"}
+
+    matches = db.find_symbols_by_name(
+        user_id, component, name, limit=max(1, limit)
+    )
+    if not matches:
+        return _not_found_payload(
+            user_id, component, name=name,
+        )
+
+    results = []
+    for m in matches:
+        source, ctx_start, ctx_end = _read_source_slice(
+            user_id,
+            component,
+            m["rel_path"],
+            m["start_line"],
+            m["end_line"],
+            context_lines,
+        )
+        results.append(
+            {
+                "rel_path": m["rel_path"],
+                "function": m["name"],
+                "kind": m["kind"],
+                "start_line": m["start_line"],
+                "end_line": m["end_line"],
+                "context_start_line": ctx_start,
+                "context_end_line": ctx_end,
+                "source": source,
+            }
+        )
+
+    return {
+        "component": component,
+        "query": name,
+        "matches_count": len(results),
+        "results": results,
+    }
+
+
+@ToolRegistry.register(
+    name="list_source_files",
+    description=(
+        "列出某组件下所有已索引的源码文件及其符号清单（函数/类名 + 行号区间）。"
+        "当需要先了解组件代码结构、再决定查看哪个文件或符号时调用。"
+        "需先在「组件管理」对相关组件构建源码索引。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "component": {"type": "string", "description": "组件名称"},
+        },
+        "required": ["component"],
+    },
+    group="source",
+)
+async def list_source_files(dataset: LogDataset, component: str) -> dict:
+    """列出组件源码文件结构与符号清单。"""
+    from ast_analysis import db
+
+    user_id = dataset.user_id
+    if user_id is None:
+        return {"error": "源码索引需登录后可用"}
+
+    files = db.list_component_files(user_id, component)
+    if not files:
+        return _not_found_payload(user_id, component)
+
+    return {
+        "component": component,
+        "files_count": len(files),
+        "files": files,
+    }
+
+
+@ToolRegistry.register(
+    name="summarize_component",
+    description=(
+        "给出某组件源码的「概览」:文件/符号总数、按顶层目录分组的文件数、"
+        "候选入口符号(init/new/register/on_*/initialize 等,集中体现组件职责)"
+        "以及符号最多的大文件。当用户问「这个组件是做什么的 / 结构 / 职责」"
+        "等开放式问题时,应**优先调用本工具**拿到全貌,再决定深入哪个符号。"
+        "有界小载荷,不含全部源码。需先在「组件管理」构建源码索引。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "component": {"type": "string", "description": "组件名称"},
+            "max_entry_symbols": {
+                "type": "integer",
+                "description": "最多返回候选入口符号数,默认 15",
+            },
+            "max_sample_files": {
+                "type": "integer",
+                "description": "最多返回大文件样本数,默认 8",
+            },
+        },
+        "required": ["component"],
+    },
+    group="source",
+)
+async def summarize_component(
+    dataset: LogDataset,
+    component: str,
+    max_entry_symbols: int = 15,
+    max_sample_files: int = 8,
+) -> dict:
+    """组件源码概览(有界小载荷):总数 + 目录分组 + 候选入口符号 + 大文件样本。"""
+    from ast_analysis import db
+
+    user_id = dataset.user_id
+    if user_id is None:
+        return {"error": "源码索引需登录后可用"}
+
+    files = db.list_component_files(user_id, component)
+    if not files:
+        return _not_found_payload(user_id, component)
+
+    # 1) 总数 + 顶层目录分组(全部文件,含 test/gen)+ 语言
+    dir_counts: dict[str, int] = {}
+    lang_counts: dict[str, int] = {}
+    for f in files:
+        rel = f["rel_path"]
+        top = rel.split("/")[0] if "/" in rel else "<root>"
+        dir_counts[top] = dir_counts.get(top, 0) + 1
+        lang_counts[f["language"]] = lang_counts.get(f["language"], 0) + 1
+
+    # 2) 候选入口符号:仅源码目录(无 src//lib/ 时回退非噪声目录)+ 方法名命中启发式
+    src_files = [
+        f for f in files if f["rel_path"].startswith(_SOURCE_DIR_PREFIXES)
+    ] or [
+        f for f in files if not f["rel_path"].startswith(_NOISE_DIR_PREFIXES)
+    ]
+    cap_e = max(1, max_entry_symbols)
+    entry: list[dict] = []
+    for f in src_files:
+        for s in f["symbols"]:
+            nm = s.get("name", "") or ""
+            if nm and _ENTRY_SYMBOL_RE.match(_entry_symbol_token(nm)):
+                entry.append(
+                    {
+                        "name": nm,
+                        "rel_path": f["rel_path"],
+                        "kind": s.get("kind", ""),
+                        "start_line": s["start_line"],
+                        "end_line": s["end_line"],
+                    }
+                )
+                if len(entry) >= cap_e:
+                    break
+        if len(entry) >= cap_e:
+            break
+
+    # 3) 大文件样本(源码目录,按 symbol_count 降序)
+    cap_s = max(1, max_sample_files)
+    largest = [
+        {
+            "rel_path": f["rel_path"],
+            "language": f["language"],
+            "symbol_count": f["symbol_count"],
+        }
+        for f in sorted(src_files, key=lambda x: x["symbol_count"], reverse=True)[
+            :cap_s
+        ]
+    ]
+
+    return {
+        "component": component,
+        "totals": {
+            "file_count": len(files),
+            "symbol_count": sum(f["symbol_count"] for f in files),
+        },
+        "by_language": lang_counts,
+        "by_top_directory": dict(
+            sorted(dir_counts.items(), key=lambda kv: kv[1], reverse=True)
+        ),
+        "entry_symbols": entry,
+        "entry_symbols_truncated": len(entry) >= cap_e,
+        "largest_source_files": largest,
+        "guidance": (
+            "以上是组件源码概览。entry_symbols 是按命名启发式挑出的候选入口符号"
+            "(集中体现组件职责)。请据此选择具体符号,再用 gather_code_context 或 "
+            "search_symbols 深入,并在最终回答中引用 file:line。"
+        ),
+    }
+
+
+@ToolRegistry.register(
+    name="get_file_source",
+    description=(
+        "按文件名取出某组件整个源码文件的内容（带行号）。"
+        "当用户指名要查看某个文件，或需要阅读完整文件上下文时调用。"
+        "超长文件会被截断并提示。需先在「组件管理」对相关组件构建源码索引。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "component": {"type": "string", "description": "组件名称"},
+            "file": {
+                "type": "string",
+                "description": "源码文件名或相对路径（如 pcie_card.lua 或 src/foo.c）",
+            },
+            "max_lines": {
+                "type": "integer",
+                "description": "最多返回的行数，超过则截断，默认 200",
+            },
+        },
+        "required": ["component", "file"],
+    },
+    group="source",
+)
+async def get_file_source(
+    dataset: LogDataset,
+    component: str,
+    file: str,
+    max_lines: int = 200,
+) -> dict:
+    """按文件名取整个源码文件。"""
+    from ast_analysis import db
+
+    user_id = dataset.user_id
+    if user_id is None:
+        return {"error": "源码索引需登录后可用"}
+
+    files = db.list_component_files(user_id, component)
+    if not files:
+        return _not_found_payload(user_id, component)
+
+    # 先按精确 rel_path 匹配，匹配不到再退化为 basename 匹配
+    target = None
+    basename_input = os.path.basename(file or "")
+    for f in files:
+        if f["rel_path"] == file or os.path.basename(f["rel_path"]) == basename_input:
+            target = f["rel_path"]
+            break
+
+    if target is None:
+        return {
+            "error": "未找到匹配的源码文件",
+            "component": component,
+            "file": file,
+            "hint": f"组件 {component} 已索引，但未找到文件 {file or ''}",
+        }
+
+    cap = max(1, max_lines)
+    source, total, truncated = _read_file_source(user_id, component, target, cap)
+    result = {
+        "component": component,
+        "rel_path": target,
+        "total_lines": total,
+        "shown_lines": min(total, cap),
+        "truncated": truncated,
+        "source": source,
+    }
+    if truncated:
+        result["hint"] = (
+            f"文件共 {total} 行，已截断展示前 {cap} 行。"
+            "如需查看特定函数，可用 get_function_source 或 search_symbols。"
+        )
+    return result
+
+
+def _not_found_payload(
+    user_id: int, component: str, name: str | None = None
+) -> dict:
+    """
+    统一构造「未命中」返回：区分组件未索引 vs 组件已索引但无匹配。
+
+    复用 db.list_user_components 判定组件是否已索引，给 agent 可操作提示。
+    """
+    from ast_analysis import db
+
+    analyzed = {c["component"] for c in db.list_user_components(user_id)}
+    if component not in analyzed:
+        return {
+            "error": "该组件尚未构建源码索引",
+            "component": component,
+            "hint": "请在「组件管理」页面为该组件构建 AST 源码索引后重试",
+        }
+    if name is not None:
+        return {
+            "error": "未找到匹配的符号",
+            "component": component,
+            "name": name,
+            "hint": f"组件 {component} 已索引，但未找到名称含 '{name}' 的符号",
+        }
+    return {
+        "component": component,
+        "files": [],
+        "hint": f"组件 {component} 已索引，但未发现任何源码文件",
+    }
+
+
 def _read_source_slice(
     user_id: int,
     component: str,
@@ -158,3 +516,250 @@ def _read_source_slice(
         f"{(lo + i + 1):>5} | {s}" for i, s in enumerate(slice_lines)
     )
     return (rendered, lo + 1, lo + len(slice_lines))
+
+
+def _read_file_source(
+    user_id: int, component: str, rel_path: str, max_lines: int
+) -> tuple[str, int, bool]:
+    """
+    读取整个源码文件（带行号），超过 max_lines 则截断。
+
+    Returns:
+        (带行号的源码, 文件实际总行数, 是否被截断)。文件读不到时源码为空串、
+        总行数 0。
+    """
+    from ast_analysis.service import _component_source_dir
+
+    path = os.path.join(_component_source_dir(user_id, component), rel_path)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return ("", 0, False)
+
+    total = len(lines)
+    truncated = total > max_lines
+    show = lines[:max_lines] if truncated else lines
+    rendered = "\n".join(
+        f"{(i + 1):>5} | {s}" for i, s in enumerate(show)
+    )
+    return (rendered, total, truncated)
+
+
+@ToolRegistry.register(
+    name="gather_code_context",
+    description=(
+        "一次性汇聚某组件中目标符号的完整代码上下文：目标函数体源码 + 同文件"
+        "兄弟符号 + 跨文件调用点。当需要基于源码定位错误根因、理解某函数行为"
+        "时，应**优先调用本工具**（而非先凭日志猜测或直接汇总答案），拿到代码"
+        "证据后再做根因分析与总结。锚点二选一：name（按符号名检索）或 file+line"
+        "（按日志行号反查，file+line 更精确优先）。返回单一聚合结果，减少多轮"
+        "工具调用。需先在「组件管理」对相关组件构建源码索引。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "component": {
+                "type": "string",
+                "description": "组件名称（日志条目的 component 字段）",
+            },
+            "name": {
+                "type": "string",
+                "description": (
+                    "目标符号名（按名称检索锚点；与 file/line 二选一，"
+                    "同时给出时以 file+line 为准）"
+                ),
+            },
+            "file": {
+                "type": "string",
+                "description": "源码文件名或相对路径（与 line 配合作为行号锚点）",
+            },
+            "line": {
+                "type": "integer",
+                "description": "出错行号（与 file 配合作为行号锚点）",
+            },
+            "context_lines": {
+                "type": "integer",
+                "description": "函数体前后额外取的上下文行数，默认 5",
+            },
+            "max_usages": {
+                "type": "integer",
+                "description": "最多返回的跨文件调用点数，默认 6",
+            },
+        },
+        "required": ["component"],
+    },
+    group="source",
+)
+async def gather_code_context(
+    dataset: LogDataset,
+    component: str,
+    name: str | None = None,
+    file: str | None = None,
+    line: int | None = None,
+    context_lines: int = 5,
+    max_usages: int = 6,
+) -> dict:
+    """
+    汇聚目标符号的完整代码上下文（函数体 + 兄弟符号 + 跨文件调用点）。
+
+    高层聚合入口：用一次调用替代「search → get_source → 手动找调用方」多轮。
+    锚点解析优先级：file+line（精确）> name。两者皆空时返回结构化错误。
+    """
+    from ast_analysis import db
+    from ast_analysis.service import _component_source_dir
+
+    user_id = dataset.user_id
+    if user_id is None:
+        return {"error": "源码索引需登录后可用"}
+
+    # --- 锚点解析（file+line 与 name 二选一；JSON Schema 无法表达，故在体内校验）---
+    file_line_anchor = bool(file) and line is not None
+    name_anchor = bool(name)
+
+    if not file_line_anchor and not name_anchor:
+        return {
+            "error": "缺少锚点：需提供 name，或 file+line",
+            "component": component,
+            "hint": "至少提供一个锚点（符号名 或 文件名+行号）",
+        }
+
+    if file_line_anchor:
+        # file+line 更精确（日志 ground truth），优先于 name
+        file_basename = os.path.basename(file or "")
+        candidates = db.find_function_at_line(
+            user_id, component, file_basename, line
+        )
+        anchor_desc = {"type": "file_line", "file": file, "line": line}
+    else:
+        # name 锚点：取首个匹配作为上下文中心（多匹配场景由 search_symbols 负责）
+        candidates = db.find_symbols_by_name(user_id, component, name, limit=1)
+        anchor_desc = {"type": "name", "name": name}
+
+    if not candidates:
+        # 复用统一「未命中」载荷：区分组件未索引 vs 符号未找到
+        return _not_found_payload(user_id, component, name=name)
+
+    primary = candidates[0]
+    rel_path = primary["rel_path"]
+
+    # 1) 目标函数体（含上下文）
+    source, ctx_start, ctx_end = _read_source_slice(
+        user_id,
+        component,
+        rel_path,
+        primary["start_line"],
+        primary["end_line"],
+        context_lines,
+    )
+
+    # 2) 同文件兄弟符号（排除目标自身，便于了解文件结构）
+    sibling_symbols: list[dict] = []
+    file_info = db.get_file_symbols(user_id, component, rel_path)
+    if file_info:
+        sibling_symbols = [
+            {
+                "name": s["name"],
+                "kind": s["kind"],
+                "start_line": s["start_line"],
+                "end_line": s["end_line"],
+            }
+            for s in file_info["symbols"]
+            if s["name"] != primary["name"]
+        ]
+
+    # 3) 跨文件调用点（有界文本扫描；root 已由 _component_source_dir 校验路径安全）
+    root = _component_source_dir(user_id, component)
+    related_usages = _find_usages(
+        root, primary["name"], rel_path, max(1, max_usages)
+    )
+
+    return {
+        "component": component,
+        "anchor": anchor_desc,
+        "target": {
+            "rel_path": rel_path,
+            "function": primary["name"],
+            "kind": primary["kind"],
+            "start_line": primary["start_line"],
+            "end_line": primary["end_line"],
+            "context_start_line": ctx_start,
+            "context_end_line": ctx_end,
+            "source": source,
+        },
+        "sibling_symbols": sibling_symbols,
+        "related_usages": related_usages,
+        "guidance": (
+            "已汇聚目标符号的函数体、同文件兄弟符号与跨文件调用点。"
+            "请先基于以上源码完成代码定位与根因分析，再给出最终汇总，"
+            "并引用具体的 file:line 证据。"
+        ),
+    }
+
+
+def _find_usages(
+    root: str,
+    name: str,
+    target_rel_path: str,
+    max_usages: int,
+    per_file_cap: int = 3,
+) -> list[dict]:
+    """
+    在源码快照根下有界扫描符号名的调用点，返回带行号的片段。
+
+    - 仅扫描 analyzer 支持的扩展名（天然跳过二进制/文档/配置）。
+    - 跳过 analyzer._SKIP_DIRS 与隐藏目录；跳过 > analyzer._MAX_FILE_BYTES。
+    - 行号渲染格式与 _read_source_slice 一致（"{n:>5} | {line}"）。
+    - 大小写敏感（c/cpp/lua 函数名均区分大小写，避免 init vs INIT 误命中）。
+    - 定义文件命中统一计入（不特殊标记），受 per_file_cap 约束。
+
+    Returns:
+        [{rel_path, line, snippet}, ...]，总量不超过 max_usages。
+    """
+    import re
+
+    from ast_analysis import analyzer
+
+    if not name:
+        return []
+
+    pattern = re.compile(rf"(?<![\w$])({re.escape(name)})(?![\w$])")
+    results: list[dict] = []
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        # 原地剪枝跳过目录 / 隐藏目录（镜像 analyzer.analyze_directory）
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in analyzer._SKIP_DIRS and not d.startswith(".")
+        ]
+        for fname in filenames:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in analyzer._EXT_TO_LANG:
+                continue
+            fpath = os.path.join(dirpath, fname)
+            try:
+                if os.path.getsize(fpath) > analyzer._MAX_FILE_BYTES:
+                    continue
+                with open(fpath, "r", encoding="utf-8", errors="replace") as fh:
+                    lines = fh.read().splitlines()
+            except OSError:
+                continue
+
+            rel = os.path.relpath(fpath, root).replace(os.sep, "/")
+            file_hits = 0
+            for i, raw in enumerate(lines, start=1):
+                if pattern.search(raw):
+                    results.append(
+                        {
+                            "rel_path": rel,
+                            "line": i,
+                            "snippet": f"{i:>5} | {raw.rstrip()}",
+                        }
+                    )
+                    file_hits += 1
+                    if len(results) >= max_usages:
+                        return results
+                    if file_hits >= per_file_cap:
+                        break
+    return results

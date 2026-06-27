@@ -23,7 +23,12 @@ class BaseLLMAdapter(ABC):
                 "type": "function",
                 "function": {"name": str, "arguments": str}
             }
-        ] | None
+        ] | None,
+        "usage": {                       # 可选；供应商返回 usage 时附带，否则省略
+            "input": int,                # prompt / 输入 token
+            "output": int,               # completion / 输出 token
+            "total": int,                # 合计 token
+        } | None
     }
     """
 
@@ -58,7 +63,10 @@ class BaseLLMAdapter(ABC):
             {"type": "content_delta", "text": str}    — 文本增量，收到即转发
             {"type": "tool_call", "tool_call": {...}}  — 一个完整累积后的工具调用
             {"type": "done", "finish_reason": str,
-             "content": str, "tool_calls": list|None}  — 流结束，携带完整内容/工具调用
+             "content": str, "tool_calls": list|None,
+             "usage": {"input": int, "output": int, "total": int} | None}
+                                                            — 流结束，携带完整内容/工具调用
+                                                              及本轮 token 消耗（可选）
 
         tool_calls 在流中是分片到达的，实现方须按 index 累积，
         finish_reason 后才整体放入 done.tool_calls。

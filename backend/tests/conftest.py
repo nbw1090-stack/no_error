@@ -233,27 +233,50 @@ class FakeLLMAdapter:
     chat() / chat_stream() 共享同一个 responses 队列（pop(0)），
     因此 ReAct 循环里交替使用两种调用方式时也按序消费。
     所有调用都会记录到 calls / stream_calls 供断言。
+
+    usages（可选）：与 responses 平行的 token 消耗列表，每个元素
+    {"input": int, "output": int, "total": int}；缺省 None → 不带 usage
+    （模拟供应商未返回 usage 的场景，现有测试零影响）。
     """
 
-    def __init__(self, responses):
+    def __init__(self, responses, usages=None):
         self.responses = list(responses)
+        self.usages = list(usages) if usages else None
         self.calls = []
         self.stream_calls = []
+
+    def _next_usage(self):
+        """与 responses 同步 pop；未提供 usages 时返回 None。"""
+        if self.usages:
+            return self.usages.pop(0)
+        return None
 
     async def chat(self, messages, tools=None):
         self.calls.append({"messages": messages, "tools": tools})
         if not self.responses:
             raise AssertionError("FakeLLM 响应队列已耗尽")
         r = self.responses.pop(0)
+        u = self._next_usage()
         if isinstance(r, str):
-            return {"role": "assistant", "content": r, "tool_calls": None}
-        return {"role": "assistant", "content": None, "tool_calls": r}
+            return {
+                "role": "assistant",
+                "content": r,
+                "tool_calls": None,
+                "usage": u,
+            }
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": r,
+            "usage": u,
+        }
 
     async def chat_stream(self, messages, tools=None):
         self.stream_calls.append({"messages": messages, "tools": tools})
         if not self.responses:
             raise AssertionError("FakeLLM 响应队列已耗尽")
         r = self.responses.pop(0)
+        u = self._next_usage()
         if isinstance(r, str):
             # 按词逐个 yield content_delta（真流式）
             words = r.split(" ")
@@ -265,6 +288,7 @@ class FakeLLMAdapter:
                 "finish_reason": "stop",
                 "content": r,
                 "tool_calls": None,
+                "usage": u,
             }
         else:
             # 工具调用轮：只 yield 一个 done（带 tool_calls），无文本增量
@@ -273,6 +297,7 @@ class FakeLLMAdapter:
                 "finish_reason": "tool_calls",
                 "content": "",
                 "tool_calls": r,
+                "usage": u,
             }
 
 
@@ -376,6 +401,17 @@ def create_session(client, dataset_id, headers):
     resp = client.post(
         "/api/sessions",
         json={"dataset_id": dataset_id},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["session_id"]
+
+
+def create_blank_session(client, headers):
+    """POST /api/sessions 创建空数据集会话（不携带 dataset_id），返回 session_id。"""
+    resp = client.post(
+        "/api/sessions",
+        json={},
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
