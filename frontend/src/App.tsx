@@ -19,6 +19,12 @@ import {
   deleteSession,
   fetchSummary,
   uploadAndParseStream,
+  getAuthToken,
+  persistAuthToken,
+  clearAuthToken,
+  fetchMe,
+  logout,
+  setUnauthorizedHandler,
 } from './api/client';
 import type {
   ParseSummary,
@@ -26,6 +32,7 @@ import type {
   SessionInfo,
   SessionMessage,
 } from './types/log';
+import type { AuthResponse, AuthUser } from './types/auth';
 import UploadZone, { type UploadStreamState } from './components/UploadZone';
 import KpiCards from './components/KpiCards';
 import FilterBar from './components/FilterBar';
@@ -34,6 +41,7 @@ import StatsPanel from './components/StatsPanel';
 import ChatPanel from './components/ChatPanel';
 import SessionSidebar from './components/SessionSidebar';
 import ComponentsPanel from './components/ComponentsPanel';
+import LoginScreen from './components/LoginScreen';
 
 const SESSION_STORAGE_KEY = 'bmc_session_id';
 
@@ -51,6 +59,10 @@ export default function App() {
 
   // ---- 视图切换：日志分析（仪表盘）/ 组件管理 ----
   const [view, setView] = useState<'dashboard' | 'components'>('dashboard');
+
+  // ---- 认证状态 ----
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [authReady, setAuthReady] = useState(false);
 
   // ---- 会话状态 ----
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -286,6 +298,69 @@ export default function App() {
   }
 
   /**
+   * 认证解析（最先运行）：若本地存有 token，校验它是否仍有效。
+   * 有效则置 currentUser；失效则清除 token。完成后置 authReady=true。
+   * 这一步必须先于业务初始化完成，因为它决定了渲染主应用还是登录界面。
+   */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const token = getAuthToken();
+      if (!token) {
+        if (!cancelled) setAuthReady(true);
+        return;
+      }
+      try {
+        const me = await fetchMe();
+        if (!cancelled) {
+          setCurrentUser({ user_id: me.user_id, username: me.username });
+        }
+      } catch {
+        // token 失效：清理掉，让用户重新登录
+        if (!cancelled) clearAuthToken();
+      } finally {
+        if (!cancelled) setAuthReady(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /** 认证成功回调（LoginScreen 登录/注册成功后触发）。 */
+  function handleAuthed(auth: AuthResponse) {
+    persistAuthToken(auth.token);
+    setCurrentUser({ user_id: auth.user_id, username: auth.username });
+  }
+
+  /**
+   * 注册 401 处理器：任意 API 收到 401（token 失效）时，client 已清 token，
+   * 这里再把 React 态重置为未登录，使界面退回登录页。挂载时注册一次。
+   */
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setCurrentUser(null);
+      setActiveSessionId(null);
+      setActiveDatasetId(null);
+      setSummary(null);
+      setPreloadedMessages(undefined);
+      try {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+      } catch {
+        // 忽略
+      }
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  /** 登出：吊销服务端 token（best-effort）+ 清除本地态。 */
+  async function handleLogout() {
+    await logout();
+    clearAuthToken();
+    setCurrentUser(null);
+  }
+
+  /**
    * 页面加载时：并行检查后端 + 加载会话列表，然后恢复上次活跃会话。
    */
   useEffect(() => {
@@ -319,6 +394,19 @@ export default function App() {
     init();
   }, []);
 
+  /**
+   * 切换会话 / 恢复会话后，把页面滚回顶部。
+   *
+   * 聊天面板位于仪表盘下方（main-content 之下）。若不重置滚动位置，
+   * 用户从上一个会话（常把页面停在底部的聊天区）切到新会话时，
+   * 仍会停留在原滚动位置，看不到顶部的日志分析结果
+   * （KPI / 日志表 / StatsPanel）。
+   * 首次恢复会话时 activeSessionId 由 null → 值同样触发，无害。
+   */
+  useEffect(() => {
+    window.scrollTo({ top: 0 });
+  }, [activeSessionId]);
+
   /** 流式解析进行中（progress 阶段） */
   const streaming = parseStream !== null;
 
@@ -327,6 +415,17 @@ export default function App() {
 
   return (
     <div className="app">
+      {/* 认证未就绪：加载中 */}
+      {!authReady ? (
+        <div className="dashboard-loading">
+          <div className="spinner" />
+          <p>加载中...</p>
+        </div>
+      ) : !currentUser ? (
+        /* 未登录：渲染登录界面，且不渲染主应用 */
+        <LoginScreen onAuthed={handleAuthed} />
+      ) : (
+        <>
       {/* 页面头部 */}
       <header className="app-header">
         <h1>BMC 日志分析系统</h1>
@@ -346,6 +445,13 @@ export default function App() {
               会话: {activeSessionId.slice(0, 8)}...
             </span>
           )}
+          <span className="user-chip" title={`已登录：${currentUser.username}`}>
+            <span className="user-avatar">{currentUser.username.slice(0, 1).toUpperCase()}</span>
+            <span className="user-name">{currentUser.username}</span>
+          </span>
+          <button className="component-btn small logout-btn" onClick={handleLogout}>
+            登出
+          </button>
         </div>
       </header>
 
@@ -367,7 +473,7 @@ export default function App() {
 
       {/* 组件管理视图：全宽渲染，隐藏侧边栏与仪表盘 */}
       {view === 'components' ? (
-        <ComponentsPanel />
+        <ComponentsPanel authed={!!currentUser} />
       ) : (
         /* 主体布局：侧边栏 + 主内容区 */
         <div className="app-layout">
@@ -445,6 +551,8 @@ export default function App() {
             )}
           </div>
         </div>
+      )}
+        </>
       )}
     </div>
   );

@@ -17,7 +17,7 @@ import logging
 import os
 import uuid
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -35,6 +35,11 @@ from observability import init_observability, get_client
 
 # 组件注册表（SQLite，纯标准库）
 import db as component_db
+
+# 用户认证 + AST 分析（独立模块，各自管理自己的 SQLite DB 与 APIRouter）
+import auth
+import ast_analysis
+from auth.dependency import get_current_user
 
 # 触发工具注册（导入即注册）
 import agent.tools  # noqa: F401
@@ -100,6 +105,25 @@ try:
 except Exception as e:
     logger.warning("Components DB init failed: %s. Components API may be unavailable.", e)
 
+# 用户认证 DB（users.db，与组件 DB 同级）
+auth.set_db_path(os.path.join(config.data_dir, "users.db"))
+try:
+    auth.init_auth_db()
+except Exception as e:
+    logger.warning("Auth DB init failed: %s. Auth API may be unavailable.", e)
+
+# AST 分析 DB（ast.db，用户维度的源码 AST 结果）
+ast_analysis.set_db_path(os.path.join(config.data_dir, "ast.db"))
+try:
+    ast_analysis.init_ast_db()
+except Exception as e:
+    logger.warning("AST DB init failed: %s. AST API may be unavailable.", e)
+
+# AST 源码快照目录（保留 clone 的源码树，供 agent 按行号取函数体）
+SOURCE_DIR = os.path.join(config.data_dir, "source")
+ast_analysis.set_source_dir(SOURCE_DIR)
+os.makedirs(SOURCE_DIR, exist_ok=True)
+
 # ============================================================
 # 请求模型
 # ============================================================
@@ -117,18 +141,16 @@ class CreateSessionRequest(BaseModel):
 
 
 class ComponentCreate(BaseModel):
-    """新建组件请求"""
+    """新建组件请求（enabled = 是否已分析，由 AST 流程维护，不由用户指定）"""
     name: str
     git_url: str = ""
     branch: str = "main"
-    enabled: bool = True
 
 
 class ComponentUpdate(BaseModel):
-    """更新组件请求"""
+    """更新组件请求（仅 git_url / branch；enabled 由 AST 流程维护）"""
     git_url: str = ""
     branch: str = "main"
-    enabled: bool = True
 
 
 # ============================================================
@@ -146,6 +168,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 挂载认证 / AST 分析路由（各 router 自带 /api/auth、/api/ast 前缀）
+app.include_router(auth.router)
+app.include_router(ast_analysis.router)
 
 # ============================================================
 # 辅助函数
@@ -170,6 +196,24 @@ def sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
+def _load_dataset_owned(dataset_id: str, user_id: int) -> dict:
+    """
+    读取数据集 JSON 并校验归属：不存在或非该用户所属一律抛 404
+    （统一为「不存在」，避免泄漏其他用户的数据集存在性）。
+
+    Returns:
+        数据集 dict（含 entries / summary / user_id）。
+    """
+    dataset_path = os.path.join(DATASETS_DIR, f"{dataset_id}.json")
+    if not os.path.exists(dataset_path):
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    with open(dataset_path) as f:
+        data = json.load(f)
+    if data.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return data
+
+
 # ============================================================
 # 健康检查
 # ============================================================
@@ -187,12 +231,15 @@ async def health_check():
 # 日志解析
 # ============================================================
 @app.post("/api/parse")
-async def parse_log(file: UploadFile = File(...)):
+async def parse_log(
+    file: UploadFile = File(...), user: dict = Depends(get_current_user)
+):
     """
     上传并解析 tar.gz 日志压缩包。
 
     接收 multipart/form-data，字段名为 file。
     流程：保存文件 → 解压提取 → 解析日志 → 持久化数据集 → 清理临时文件。
+    数据集打上当前登录用户的 user_id（用户隔离）。
     """
     tracer = get_client()
 
@@ -213,13 +260,15 @@ async def parse_log(file: UploadFile = File(...)):
             # ---- 3. 解析日志 ----
             result = parse_logs(app_content, framework_content)
 
-            # ---- 4. 持久化数据集 ----
+            # ---- 4. 持久化数据集（打上归属用户）----
             dataset_id = uuid.uuid4().hex[:12]
             dataset_path = os.path.join(DATASETS_DIR, f"{dataset_id}.json")
             dataset_data = {
                 "dataset_id": dataset_id,
                 "entries": result["entries"],
                 "summary": result["summary"],
+                "user_id": user["id"],
+                "username": user["username"],
             }
             atomic_write_json(dataset_path, dataset_data)
 
@@ -277,7 +326,9 @@ async def parse_log(file: UploadFile = File(...)):
 # 日志解析（SSE 流式输出）
 # ============================================================
 @app.post("/api/parse/stream")
-async def parse_log_stream(file: UploadFile = File(...)):
+async def parse_log_stream(
+    file: UploadFile = File(...), user: dict = Depends(get_current_user)
+):
     """
     上传并解析 tar.gz 日志压缩包（SSE 流式版本）。
 
@@ -289,6 +340,7 @@ async def parse_log_stream(file: UploadFile = File(...)):
 
     不变量：summary 事件到达 ⟺ dataset.json 已完整原子落盘。
     因此前端收到 summary 即可安全创建会话，chat 端点读盘也绝不会拿到半成品。
+    数据集打上当前登录用户的 user_id（用户隔离）。
     """
     tracer = get_client()
 
@@ -296,6 +348,8 @@ async def parse_log_stream(file: UploadFile = File(...)):
     # 必须在 generator 外完成：StreamingResponse 开始迭代时底层 UploadFile 可能
     # 已被关闭，在 generator 内 await file.read() 会抛 "read of closed file"。
     content = await file.read()
+    owner_id = user["id"]
+    owner_name = user["username"]
 
     async def event_generator():
         with tracer.observation(
@@ -322,7 +376,7 @@ async def parse_log_stream(file: UploadFile = File(...)):
                 entries = result["entries"]
                 summary = result["summary"]
 
-                # ---- 4. 原子落盘（在推送 summary 之前完成）----
+                # ---- 4. 原子落盘（在推送 summary 之前完成；打上归属用户）----
                 dataset_id = uuid.uuid4().hex[:12]
                 dataset_path = os.path.join(DATASETS_DIR, f"{dataset_id}.json")
                 atomic_write_json(
@@ -331,6 +385,8 @@ async def parse_log_stream(file: UploadFile = File(...)):
                         "dataset_id": dataset_id,
                         "entries": entries,
                         "summary": summary,
+                        "user_id": owner_id,
+                        "username": owner_name,
                     },
                 )
 
@@ -387,7 +443,7 @@ async def parse_log_stream(file: UploadFile = File(...)):
 # Agent 对话
 # ============================================================
 @app.post("/api/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
     """
     Agent 对话接口。
 
@@ -398,12 +454,12 @@ async def chat(req: ChatRequest):
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-    # ---- 验证会话存在 ----
-    session = session_manager.get(req.session_id)
+    # ---- 验证会话存在且归属当前用户 ----
+    session = session_manager.get(req.session_id, user["id"])
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # ---- 加载数据集 ----
+    # ---- 加载数据集（会话归属已校验，其 dataset 必属同一用户）----
     dataset_path = os.path.join(DATASETS_DIR, f"{session.dataset_id}.json")
     if not os.path.exists(dataset_path):
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -414,6 +470,7 @@ async def chat(req: ChatRequest):
     dataset = LogDataset(
         entries=data["entries"],
         summary=_ensure_summary_complete(data["summary"], data["entries"]),
+        user_id=user["id"],
     )
 
     tracer = get_client()
@@ -490,7 +547,7 @@ async def chat(req: ChatRequest):
 # Agent 对话（SSE 流式输出）
 # ============================================================
 @app.post("/api/chat/stream")
-async def chat_stream(req: ChatRequest):
+async def chat_stream(req: ChatRequest, user: dict = Depends(get_current_user)):
     """
     Agent 对话接口（SSE 流式输出版本）。
 
@@ -500,12 +557,12 @@ async def chat_stream(req: ChatRequest):
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-    # ---- 验证会话存在 ----
-    session = session_manager.get(req.session_id)
+    # ---- 验证会话存在且归属当前用户 ----
+    session = session_manager.get(req.session_id, user["id"])
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # ---- 加载数据集 ----
+    # ---- 加载数据集（会话归属已校验，其 dataset 必属同一用户）----
     dataset_path = os.path.join(DATASETS_DIR, f"{session.dataset_id}.json")
     if not os.path.exists(dataset_path):
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -516,6 +573,7 @@ async def chat_stream(req: ChatRequest):
     dataset = LogDataset(
         entries=data["entries"],
         summary=_ensure_summary_complete(data["summary"], data["entries"]),
+        user_id=user["id"],
     )
 
     tracer = get_client()
@@ -702,7 +760,9 @@ def _ensure_summary_complete(summary: dict, entries: list) -> dict:
 
 
 @app.get("/api/datasets/{dataset_id}")
-async def get_dataset(dataset_id: str):
+async def get_dataset(
+    dataset_id: str, user: dict = Depends(get_current_user)
+):
     """
     获取数据集的汇总统计（summary）。
 
@@ -711,14 +771,10 @@ async def get_dataset(dataset_id: str):
 
     旧数据集（summary 缺 componentErrors）在此按 entries 现场补齐，
     保证前端 StatsPanel 始终能拿到组件错误分布。
+
+    校验归属：非该用户的数据集统一返回 404（不泄漏存在性）。
     """
-    dataset_path = os.path.join(DATASETS_DIR, f"{dataset_id}.json")
-    if not os.path.exists(dataset_path):
-        raise HTTPException(status_code=404, detail="Dataset not found")
-
-    with open(dataset_path) as f:
-        data = json.load(f)
-
+    data = _load_dataset_owned(dataset_id, user["id"])
     summary = _ensure_summary_complete(data["summary"], data["entries"])
 
     return {
@@ -772,15 +828,17 @@ async def get_dataset_entries(
     component: str | None = None,
     level: str | None = None,
     search: str | None = None,
+    user: dict = Depends(get_current_user),
 ):
     """
     分页获取数据集的日志条目（支持筛选）。
 
     前端 LogTable 按需加载：首屏取前 limit 条，滚动到底加载下一批。
+    校验归属：非该用户的数据集统一返回 404。
     """
+    # 先做归属校验（非属主 404），再交线程池分页
+    _load_dataset_owned(dataset_id, user["id"])
     dataset_path = os.path.join(DATASETS_DIR, f"{dataset_id}.json")
-    if not os.path.exists(dataset_path):
-        raise HTTPException(status_code=404, detail="Dataset not found")
 
     page, total, has_more = await asyncio.to_thread(
         _load_filter_page,
@@ -808,21 +866,20 @@ async def get_dataset_entries(
 
 
 @app.post("/api/sessions")
-async def create_session(req: CreateSessionRequest):
+async def create_session(
+    req: CreateSessionRequest, user: dict = Depends(get_current_user)
+):
     """
-    创建新的聊天会话。
+    创建新的聊天会话（归属当前登录用户）。
 
-    会话关联到已上传的数据集，不同会话之间完全隔离。
+    校验数据集存在且属于该用户，再创建会话；不同用户、不同会话之间隔离。
     """
-    # 验证数据集存在
-    dataset_path = os.path.join(DATASETS_DIR, f"{req.dataset_id}.json")
-    if not os.path.exists(dataset_path):
-        raise HTTPException(
-            status_code=404,
-            detail=f"Dataset not found: {req.dataset_id}",
-        )
+    # 验证数据集存在且归属当前用户（非属主统一 404）
+    _load_dataset_owned(req.dataset_id, user["id"])
 
-    session = session_manager.create(req.dataset_id)
+    session = session_manager.create(
+        req.dataset_id, user["id"], user["username"]
+    )
     return {
         "session_id": session.session_id,
         "dataset_id": session.dataset_id,
@@ -832,20 +889,23 @@ async def create_session(req: CreateSessionRequest):
 
 
 @app.get("/api/sessions")
-async def list_sessions():
-    """列出所有会话（仅元数据，不含消息体）"""
-    sessions = session_manager.list_all()
+async def list_sessions(user: dict = Depends(get_current_user)):
+    """列出当前用户的会话（仅元数据，不含消息体）。"""
+    sessions = session_manager.list_all(user["id"])
     return {"sessions": sessions}
 
 
 @app.get("/api/sessions/{session_id}")
-async def get_session(session_id: str):
+async def get_session(
+    session_id: str, user: dict = Depends(get_current_user)
+):
     """
     获取会话详情，包含完整的消息历史。
 
     用于会话恢复：前端可通过此接口恢复之前的对话。
+    校验归属：非该用户的会话统一返回 404。
     """
-    session = session_manager.get(session_id)
+    session = session_manager.get(session_id, user["id"])
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -859,38 +919,45 @@ async def get_session(session_id: str):
 
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str):
-    """删除会话"""
-    deleted = session_manager.delete(session_id)
+async def delete_session(
+    session_id: str, user: dict = Depends(get_current_user)
+):
+    """删除会话（校验归属：非该用户的会话统一返回 404）。"""
+    deleted = session_manager.delete(session_id, user["id"])
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"deleted": True}
 
 
 # ============================================================
-# 组件管理 API
+# 组件管理 API（按用户隔离）
 # ============================================================
 # 所有 DB 调用经 asyncio.to_thread 交给线程池，避免阻塞事件循环。
-# 测试通过 db.set_db_path() 重定向 COMPONENTS_DB_PATH 即可隔离。
+# enabled = 「该组件是否已被当前用户 AST 分析」，由 AST 流程维护，
+# 故此处不暴露手动翻转接口；create/update 不接受 enabled。
 
 
 @app.get("/api/components")
-async def list_components():
-    """列出全部注册组件"""
-    components = await asyncio.to_thread(component_db.list_components)
+async def list_components(user: dict = Depends(get_current_user)):
+    """列出当前用户的注册组件（enabled 反映是否已分析）。"""
+    components = await asyncio.to_thread(
+        component_db.list_components, user["id"]
+    )
     return {"components": components}
 
 
 @app.post("/api/components", status_code=201)
-async def create_component(req: ComponentCreate):
-    """新建组件；主键冲突返回 409"""
+async def create_component(
+    req: ComponentCreate, user: dict = Depends(get_current_user)
+):
+    """新建组件（归属当前用户）；主键冲突返回 409"""
     try:
         component = await asyncio.to_thread(
             component_db.create_component,
+            user["id"],
             req.name,
             req.git_url,
             req.branch,
-            req.enabled,
         )
     except ValueError:
         raise HTTPException(status_code=409, detail="Component already exists")
@@ -898,36 +965,32 @@ async def create_component(req: ComponentCreate):
 
 
 @app.put("/api/components/{name}")
-async def update_component(name: str, req: ComponentUpdate):
-    """更新指定组件；不存在返回 404"""
+async def update_component(
+    name: str, req: ComponentUpdate, user: dict = Depends(get_current_user)
+):
+    """更新指定组件（归属当前用户）；不存在返回 404"""
     try:
         component = await asyncio.to_thread(
             component_db.update_component,
+            user["id"],
             name,
             req.git_url,
             req.branch,
-            req.enabled,
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Component not found")
     return component
 
 
-@app.patch("/api/components/{name}/toggle")
-async def toggle_component(name: str):
-    """翻转组件 enabled 状态；不存在返回 404"""
-    try:
-        component = await asyncio.to_thread(component_db.toggle_component, name)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Component not found")
-    return component
-
-
 @app.delete("/api/components/{name}")
-async def delete_component(name: str):
-    """删除组件；不存在返回 404"""
+async def delete_component(
+    name: str, user: dict = Depends(get_current_user)
+):
+    """删除组件（归属当前用户）；不存在返回 404"""
     try:
-        await asyncio.to_thread(component_db.delete_component, name)
+        await asyncio.to_thread(
+            component_db.delete_component, user["id"], name
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Component not found")
     return {"deleted": True}

@@ -82,15 +82,25 @@ export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps
   const [isRestoring, setIsRestoring] = useState(true);
   const [toolProgress, setToolProgress] = useState<string | null>(null);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const streamingMsgIdRef = useRef<string | null>(null);
   const hasStreamingContentRef = useRef(false);
 
-  /** 自动滚动到底部 */
+  /**
+   * 滚动到消息列表底部。
+   *
+   * 只设置面板内部 .chat-messages 容器自身的 scrollTop，而不调用 scrollIntoView：
+   * scrollIntoView 会连带滚动整个页面（window），把页面定位到位于底部的聊天面板，
+   * 导致顶部的日志分析结果（KPI / 日志表 / StatsPanel）被滚出视口。
+   * 容器自身已设 scroll-behavior: smooth，故平滑滚动体验不变。
+   */
   function scrollToBottom() {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const container = messagesContainerRef.current;
+    if (container) {
+      container.scrollTop = container.scrollHeight;
+    }
   }
 
   useEffect(() => {
@@ -284,7 +294,7 @@ export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps
           <span className="thinking-text">恢复会话中...</span>
         </div>
       ) : hasMessages ? (
-        <div className="chat-messages">
+        <div className="chat-messages" ref={messagesContainerRef}>
           {messages.map((msg) => (
             <div key={msg.id} className={`chat-message ${msg.role}`}>
               <div
@@ -308,9 +318,6 @@ export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps
               </span>
             </div>
           )}
-
-          {/* 滚动锚点 */}
-          <div ref={messagesEndRef} />
         </div>
       ) : (
         <div className="chat-empty">

@@ -321,6 +321,11 @@
   transition: background 0.15s, border-color 0.15s;
 }
 
+/* 只读状态徽章（非交互式：反映「是否已进行 AST 分析」） */
+.toggle-badge.static {
+  cursor: default;
+}
+
 .toggle-badge.on {
   background: rgba(50, 215, 75, 0.08);
   border-color: rgba(50, 215, 75, 0.4);
@@ -429,3 +434,209 @@
     width: 100%;
   }
 }
+
+/* ================================================================
+ * 多选复选框列 + AST 分析相关样式
+ * ================================================================ */
+
+/* 行内 / 全选复选框：紧凑深色风 */
+.row-check,
+.select-all-check {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent-data);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.cell-select-all {
+  width: 36px;
+  padding-right: 0;
+}
+
+/* ---- AST 操作栏 ---- */
+.ast-actionbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+  padding: 10px 14px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  flex-wrap: wrap;
+}
+
+.ast-counter {
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.ast-counter b {
+  color: var(--text-primary);
+}
+
+.ast-actionbar-spacer {
+  flex: 1 1 auto;
+}
+
+.ast-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* ---- 分析错误提示 ---- */
+.ast-analyze-error {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  background: rgba(255, 69, 58, 0.08);
+  border: 1px solid rgba(255, 69, 58, 0.4);
+  border-radius: 8px;
+  color: var(--accent-alert);
+  font-size: 13px;
+  font-family: var(--font-body);
+}
+
+/* ---- 进度面板 ---- */
+.ast-progress {
+  margin: 16px 0;
+  padding: 14px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: fadeInUp 0.2s ease-out;
+}
+
+.ast-stage {
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--accent-data);
+}
+
+/* 进度表格复用 .components-table / .ast-results-table，但不带外层滚动壳 */
+.ast-results-table {
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+/* ---- 结果徽章 ---- */
+.ast-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.ast-badge.added {
+  color: var(--accent-ok);
+  background: rgba(50, 215, 75, 0.1);
+  border-color: rgba(50, 215, 75, 0.4);
+}
+
+.ast-badge.updated {
+  color: var(--accent-data);
+  background: rgba(0, 229, 255, 0.1);
+  border-color: rgba(0, 229, 255, 0.4);
+}
+
+.ast-badge.unchanged {
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--border-subtle);
+}
+
+.ast-badge.removed,
+.ast-badge.error {
+  color: var(--accent-alert);
+  background: rgba(255, 69, 58, 0.1);
+  border-color: rgba(255, 69, 58, 0.4);
+}
+
+/* ---- 汇总统计 ---- */
+.ast-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-family: var(--font-body);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ast-summary-item b {
+  color: var(--text-primary);
+  font-weight: 700;
+  margin-left: 2px;
+}
+
+.ast-summary-divider {
+  width: 1px;
+  height: 14px;
+  background: var(--border-subtle);
+}
+
+/* ---- 已存储结果区块 ---- */
+.ast-stored {
+  margin-top: 24px;
+  padding: 16px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+}
+
+.ast-stored-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-family: var(--font-body);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 12px 0;
+}
+
+.ast-stored-time {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.ast-empty {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* ---- 语言聚合徽章 ---- */
+.ast-langs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.ast-lang-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: rgba(0, 229, 255, 0.08);
+  border: 1px solid rgba(0, 229, 255, 0.3);
+  color: var(--accent-data);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+

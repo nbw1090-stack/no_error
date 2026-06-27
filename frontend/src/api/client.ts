@@ -1,5 +1,9 @@
 /**
  * API 客户端 —— 封装对后端的 fetch 调用
+ *
+ * 鉴权：除 /api/health 与 /api/auth/login|register 外，所有请求都附加
+ * `Authorization: Bearer <token>`（authHeaders）。任一请求收到 401 时，
+ * 经 setUnauthorizedHandler 注册的回调清空登录态并退回登录界面。
  */
 
 import type {
@@ -14,8 +18,85 @@ import type {
   StreamEvent,
 } from '../types/log';
 import type { ComponentInfo } from '../types/component';
+import type { AuthResponse, AuthUser } from '../types/auth';
+import type { AstAnalyzeEvent, AstResult } from '../types/ast';
 
 const API_BASE = '/api';
+
+/** localStorage key for the persisted Bearer token. */
+const AUTH_TOKEN_KEY = 'bmc_auth_token';
+
+/**
+ * 读取 localStorage 中持久化的认证 token。
+ * @returns token 字符串，或未登录时返回 null。
+ */
+export function getAuthToken(): string | null {
+  try {
+    return localStorage.getItem(AUTH_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** 写入 / 清除 token（内部使用）。 */
+function setAuthToken(token: string): void {
+  try {
+    localStorage.setItem(AUTH_TOKEN_KEY, token);
+  } catch {
+    // 忽略 localStorage 不可用
+  }
+}
+
+/** 清除 token（登出 / token 失效时）。 */
+export function clearAuthToken(): void {
+  try {
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+  } catch {
+    // 忽略
+  }
+}
+
+/**
+ * 构造请求头：当存在 token 时附加 `Authorization: Bearer <token>`。
+ * @param extra 额外的 header（如 Content-Type）。
+ */
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra || {}) };
+  const token = getAuthToken();
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return headers;
+}
+
+// ============================================================
+// 401 统一处理：token 失效 → 清空本地态并通知 App 退回登录
+// ============================================================
+
+let unauthorizedHandler: (() => void) | null = null;
+
+/**
+ * 注册「未授权」回调：App 挂载时调用，传入「清空 currentUser + 活跃会话态」。
+ * 传 null 可注销。
+ */
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  unauthorizedHandler = fn;
+}
+
+/**
+ * 响应为 401 时：清 token + 触发回调（让 UI 退回登录），并抛出可识别错误。
+ */
+function onUnauthorized(): never {
+  clearAuthToken();
+  if (unauthorizedHandler) {
+    try {
+      unauthorizedHandler();
+    } catch {
+      // 回调失败不影响抛错
+    }
+  }
+  throw new Error('登录已过期，请重新登录');
+}
 
 /**
  * 上传 tar.gz 文件并获取解析结果
@@ -26,9 +107,11 @@ export async function uploadAndParse(file: File): Promise<ParseResult> {
 
   const response = await fetch(`${API_BASE}/parse`, {
     method: 'POST',
+    headers: authHeaders(),
     body: formData,
   });
 
+  if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     const errorData = await response.json().catch(() => null);
     throw new Error(errorData?.errors?.[0] || `服务器错误: ${response.status}`);
@@ -63,11 +146,12 @@ export async function sendChatMessage(
 ): Promise<ChatResponse> {
   const response = await fetch(`${API_BASE}/chat`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(req),
     signal,
   });
 
+  if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     const errorData = await response.json().catch(() => null);
     throw new Error(errorData?.detail || `服务器错误: ${response.status}`);
@@ -126,11 +210,12 @@ export async function* sendChatMessageStream(
 ): AsyncGenerator<StreamEvent> {
   const response = await fetch(`${API_BASE}/chat/stream`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(req),
     signal,
   });
 
+  if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     const errorData = await response.json().catch(() => null);
     throw new Error(errorData?.detail || `服务器错误: ${response.status}`);
@@ -161,10 +246,12 @@ export async function* uploadAndParseStream(
 
   const response = await fetch(`${API_BASE}/parse/stream`, {
     method: 'POST',
+    headers: authHeaders(),
     body: formData,
     signal,
   });
 
+  if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     const errorData = await response.json().catch(() => null);
     throw new Error(errorData?.detail || `服务器错误: ${response.status}`);
@@ -187,8 +274,11 @@ export async function* uploadAndParseStream(
 export async function fetchSummary(
   datasetId: string,
 ): Promise<{ dataset_id: string; summary: ParseSummary }> {
-  const response = await fetch(`${API_BASE}/datasets/${datasetId}`);
+  const response = await fetch(`${API_BASE}/datasets/${datasetId}`, {
+    headers: authHeaders(),
+  });
 
+  if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     throw new Error('数据集不存在');
   }
@@ -217,8 +307,10 @@ export async function fetchEntries(
 
   const response = await fetch(
     `${API_BASE}/datasets/${datasetId}/entries?${params.toString()}`,
+    { headers: authHeaders() },
   );
 
+  if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     throw new Error('加载日志条目失败');
   }
@@ -231,15 +323,16 @@ export async function fetchEntries(
 // ============================================================
 
 /**
- * 创建新的聊天会话
+ * 创建新的聊天会话（归属当前登录用户，由 token 决定）
  */
 export async function createSession(datasetId: string): Promise<SessionInfo> {
   const response = await fetch(`${API_BASE}/sessions`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ dataset_id: datasetId }),
   });
 
+  if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     const errorData = await response.json().catch(() => null);
     throw new Error(errorData?.detail || '创建会话失败');
@@ -252,8 +345,11 @@ export async function createSession(datasetId: string): Promise<SessionInfo> {
  * 获取会话详情（含完整消息历史）
  */
 export async function getSession(sessionId: string): Promise<SessionDetail> {
-  const response = await fetch(`${API_BASE}/sessions/${sessionId}`);
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}`, {
+    headers: authHeaders(),
+  });
 
+  if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     throw new Error('会话不存在');
   }
@@ -262,11 +358,14 @@ export async function getSession(sessionId: string): Promise<SessionDetail> {
 }
 
 /**
- * 列出所有会话
+ * 列出当前用户的会话（后端按 token 过滤）
  */
 export async function listSessions(): Promise<{ sessions: SessionInfo[] }> {
-  const response = await fetch(`${API_BASE}/sessions`);
+  const response = await fetch(`${API_BASE}/sessions`, {
+    headers: authHeaders(),
+  });
 
+  if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     throw new Error('获取会话列表失败');
   }
@@ -280,23 +379,34 @@ export async function listSessions(): Promise<{ sessions: SessionInfo[] }> {
 export async function deleteSession(sessionId: string): Promise<void> {
   const response = await fetch(`${API_BASE}/sessions/${sessionId}`, {
     method: 'DELETE',
+    headers: authHeaders(),
   });
 
+  if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     throw new Error('删除会话失败');
   }
 }
 
 // ============================================================
-// 组件注册表 API
+// 组件注册表 API（按用户隔离；enabled = 是否已分析，由 AST 流程维护）
 // ============================================================
 
+/** 新建组件的请求体（不含 enabled —— 由 AST 流程维护） */
+export type ComponentCreatePayload = Pick<ComponentInfo, 'name' | 'git_url' | 'branch'>;
+
+/** 更新组件的请求体（仅 git_url / branch；enabled 由 AST 流程维护） */
+export type ComponentUpdatePayload = Pick<ComponentInfo, 'git_url' | 'branch'>;
+
 /**
- * 列出所有已注册组件
+ * 列出当前用户的注册组件（enabled 反映是否已分析）
  */
 export async function listComponents(): Promise<ComponentInfo[]> {
-  const response = await fetch(`${API_BASE}/components`);
+  const response = await fetch(`${API_BASE}/components`, {
+    headers: authHeaders(),
+  });
 
+  if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     const errorData = await response.json().catch(() => null);
     throw new Error(errorData?.detail || '获取组件列表失败');
@@ -310,14 +420,15 @@ export async function listComponents(): Promise<ComponentInfo[]> {
  * 创建新组件
  */
 export async function createComponent(
-  comp: Omit<ComponentInfo, never>,
+  comp: ComponentCreatePayload,
 ): Promise<ComponentInfo> {
   const response = await fetch(`${API_BASE}/components`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(comp),
   });
 
+  if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     const errorData = await response.json().catch(() => null);
     if (response.status === 409) {
@@ -330,18 +441,19 @@ export async function createComponent(
 }
 
 /**
- * 更新组件（git_url / branch / enabled）
+ * 更新组件（git_url / branch；改源码会由后端重置 enabled=false）
  */
 export async function updateComponent(
   name: string,
-  comp: Pick<ComponentInfo, 'git_url' | 'branch' | 'enabled'>,
+  comp: ComponentUpdatePayload,
 ): Promise<ComponentInfo> {
   const response = await fetch(`${API_BASE}/components/${encodeURIComponent(name)}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(comp),
   });
 
+  if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     const errorData = await response.json().catch(() => null);
     if (response.status === 404) {
@@ -354,19 +466,28 @@ export async function updateComponent(
 }
 
 /**
- * 切换组件的 enabled 状态
+ * 删除当前用户对某组件的 AST 分析结果。
+ *
+ * 组件本身不从注册表删除；后端会把它标记为不可用（enabled=false），
+ * 表示「暂未被 AST 分析」。返回更新后的组件信息（含 enabled=false）。
+ *
+ * @returns {deleted, component}；401 → 「登录已过期」，404 → 「组件不存在」。
  */
-export async function toggleComponent(name: string): Promise<ComponentInfo> {
-  const response = await fetch(`${API_BASE}/components/${encodeURIComponent(name)}/toggle`, {
-    method: 'PATCH',
+export async function deleteAstAnalysis(
+  name: string,
+): Promise<{ deleted: boolean; component: ComponentInfo }> {
+  const response = await fetch(`${API_BASE}/ast/components/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
   });
 
+  if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     const errorData = await response.json().catch(() => null);
     if (response.status === 404) {
       throw new Error('组件不存在');
     }
-    throw new Error(errorData?.detail || '切换组件状态失败');
+    throw new Error(errorData?.detail || '删除 AST 分析失败');
   }
 
   return response.json();
@@ -378,13 +499,156 @@ export async function toggleComponent(name: string): Promise<ComponentInfo> {
 export async function deleteComponent(name: string): Promise<void> {
   const response = await fetch(`${API_BASE}/components/${encodeURIComponent(name)}`, {
     method: 'DELETE',
+    headers: authHeaders(),
   });
 
+  if (response.status === 401) onUnauthorized();
   if (!response.ok) {
     const errorData = await response.json().catch(() => null);
     if (response.status === 404) {
       throw new Error('组件不存在');
     }
     throw new Error(errorData?.detail || '删除组件失败');
+  }
+}
+
+// ============================================================
+// 认证（Auth）API
+// ============================================================
+
+/**
+ * 注册新账号。
+ * @returns 含 token 的认证响应；409 → "用户名已存在"，400 → 后端 detail。
+ */
+export async function register(username: string, password: string): Promise<AuthResponse> {
+  const response = await fetch(`${API_BASE}/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    if (response.status === 409) {
+      throw new Error('用户名已存在');
+    }
+    throw new Error(errorData?.detail || '注册失败');
+  }
+
+  return response.json();
+}
+
+/**
+ * 登录。@returns 认证响应；401 → "用户名或密码错误"。
+ */
+export async function login(username: string, password: string): Promise<AuthResponse> {
+  const response = await fetch(`${API_BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error('用户名或密码错误');
+    }
+    const errorData = await response.json().catch(() => null);
+    throw new Error(errorData?.detail || '登录失败');
+  }
+
+  return response.json();
+}
+
+/**
+ * 用持久化的 token 校验当前登录用户。
+ * @throws token 缺失或失效时抛出。
+ */
+export async function fetchMe(): Promise<AuthUser> {
+  const response = await fetch(`${API_BASE}/auth/me`, {
+    headers: authHeaders(),
+  });
+
+  if (!response.ok) {
+    throw new Error('认证失效');
+  }
+
+  return response.json();
+}
+
+/**
+ * 登出（best-effort）：吊销服务端 token，忽略网络/响应错误。
+ */
+export async function logout(): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/auth/logout`, {
+      method: 'POST',
+      headers: authHeaders(),
+    });
+  } catch {
+    // 登出失败不影响本地登出
+  }
+}
+
+/**
+ * 将 token 持久化到 localStorage（登录/注册成功后调用）。
+ * 暴露为 public 是因为 LoginScreen/App 在认证成功回调里需要写 token。
+ */
+export function persistAuthToken(token: string): void {
+  setAuthToken(token);
+}
+
+// ============================================================
+// AST 语法分析 API
+// ============================================================
+
+/**
+ * 获取当前用户已存储的 AST 分析结果。
+ * @returns 分析结果；尚未分析时（HTTP 404）返回 null。
+ */
+export async function getAstResult(): Promise<AstResult | null> {
+  const response = await fetch(`${API_BASE}/ast/result`, {
+    headers: authHeaders(),
+  });
+
+  if (response.status === 401) onUnauthorized();
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    throw new Error(errorData?.detail || '获取 AST 结果失败');
+  }
+
+  return response.json();
+}
+
+/**
+ * 提交组件进行 AST 语法分析（SSE 流式）。
+ *
+ * 复用 readSSE 解析 `data:` 行。事件联合见 AstAnalyzeEvent。
+ *
+ * @param componentNames 待分析的组件名列表（非空，否则后端在流式前返回 400）。
+ * @param signal         可选的 AbortSignal，用于停止按钮中断流。
+ * @yields               AstAnalyzeEvent。
+ */
+export async function* analyzeAstStream(
+  componentNames: string[],
+  signal?: AbortSignal,
+): AsyncGenerator<AstAnalyzeEvent> {
+  const response = await fetch(`${API_BASE}/ast/analyze`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ component_names: componentNames }),
+    signal,
+  });
+
+  if (response.status === 401) onUnauthorized();
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    throw new Error(errorData?.detail || `服务器错误: ${response.status}`);
+  }
+
+  for await (const event of readSSE(response)) {
+    yield event as AstAnalyzeEvent;
   }
 }

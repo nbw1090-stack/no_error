@@ -295,6 +295,8 @@ def tmp_data(tmp_path, monkeypatch):
     """
     import main
     import db
+    import auth
+    import ast_analysis
 
     datasets_dir = tmp_path / "datasets"
     sessions_dir = tmp_path / "sessions"
@@ -306,16 +308,35 @@ def tmp_data(tmp_path, monkeypatch):
         main, "session_manager", main.SessionManager(str(sessions_dir))
     )
 
-    # 组件 DB 同样重定向到 tmp_path，避免污染真实 backend/data/components.db
+    # 组件 DB 同样重定向到 tmp_path，避免污染真实 backend/data/components.db。
+    # 注意：init_db 不再全局播种——默认组件改为按用户在注册时 ensure_seeded
+    # （authed fixture 注册 alice 时即播种）。
     components_db_path = str(tmp_path / "components.db")
     db.set_db_path(components_db_path)
-    db.init_db()  # 重新播种，保证每个测试从已播种状态开始
+    db.init_db()
+
+    # 认证 / AST 分析 DB 同样重定向到 tmp_path，避免污染真实 backend/data
+    auth_db_path = str(tmp_path / "users.db")
+    auth.set_db_path(auth_db_path)
+    auth.init_auth_db()
+
+    ast_db_path = str(tmp_path / "ast.db")
+    ast_analysis.set_db_path(ast_db_path)
+    ast_analysis.init_ast_db()
+
+    # AST 源码快照目录（保留 clone 的源码树）同样重定向到 tmp_path
+    source_dir = str(tmp_path / "source")
+    os.makedirs(source_dir, exist_ok=True)
+    ast_analysis.set_source_dir(source_dir)
 
     return {
         "main": main,
         "datasets": datasets_dir,
         "sessions": sessions_dir,
         "components_db": components_db_path,
+        "auth_db": auth_db_path,
+        "ast_db": ast_db_path,
+        "source_dir": source_dir,
     }
 
 
@@ -328,22 +349,83 @@ def client(tmp_data):
 
 @pytest.fixture
 def seed_dataset(tmp_data):
-    """返回一个写入数据集 JSON 的辅助函数，返回 dataset_id。"""
+    """返回一个写入数据集 JSON 的辅助函数，返回 dataset_id。
+
+    user_id 为必填（数据集按用户隔离）：测试中传 authed["user_id"]。
+    """
     main = tmp_data["main"]
 
-    def _seed(entries, summary, dataset_id=None):
+    def _seed(entries, summary, user_id, dataset_id=None):
         dataset_id = dataset_id or uuid.uuid4().hex[:12]
         main.atomic_write_json(
             os.path.join(main.DATASETS_DIR, f"{dataset_id}.json"),
-            {"dataset_id": dataset_id, "entries": entries, "summary": summary},
+            {
+                "dataset_id": dataset_id,
+                "entries": entries,
+                "summary": summary,
+                "user_id": user_id,
+            },
         )
         return dataset_id
 
     return _seed
 
 
-def create_session(client, dataset_id):
-    """POST /api/sessions 创建会话，返回 session_id。"""
-    resp = client.post("/api/sessions", json={"dataset_id": dataset_id})
+def create_session(client, dataset_id, headers):
+    """POST /api/sessions 创建会话（需带鉴权头），返回 session_id。"""
+    resp = client.post(
+        "/api/sessions",
+        json={"dataset_id": dataset_id},
+        headers=headers,
+    )
     assert resp.status_code == 200, resp.text
     return resp.json()["session_id"]
+
+
+# ============================================================
+# 7. 认证 fixture：注册一个测试用户，返回 (client, token, headers, user_id)
+# ============================================================
+@pytest.fixture
+def authed(client):
+    """
+    注册 alice/secret123 并返回认证上下文。
+
+    Returns:
+        {"client", "token", "headers", "user_id", "username"}
+    """
+    resp = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": "secret123"},
+    )
+    assert resp.status_code == 201, resp.text
+    data = resp.json()
+    token = data["token"]
+    return {
+        "client": client,
+        "token": token,
+        "headers": {"Authorization": f"Bearer {token}"},
+        "user_id": data["user_id"],
+        "username": data["username"],
+    }
+
+
+# ============================================================
+# 8. SSE 解析工具：从 TestClient 响应里抽取 data: 事件
+# ============================================================
+def parse_sse_events(response):
+    """
+    把 TestClient 的流式响应解析成事件 dict 列表。
+
+    TestClient 会把 StreamingResponse 的全部 chunk 拼到 response.text，
+    因此可以一次性按 'data: ' 前缀切分。
+    """
+    events = []
+    for chunk in response.iter_lines():
+        if isinstance(chunk, bytes):
+            chunk = chunk.decode("utf-8", errors="replace")
+        if chunk.startswith("data:"):
+            payload = chunk[len("data:"):].strip()
+            if payload:
+                events.append(json.loads(payload))
+    return events
+

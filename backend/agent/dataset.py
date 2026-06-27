@@ -17,6 +17,9 @@ class LogDataset:
 
     entries: list[dict]  # 解析后的日志条目列表
     summary: dict  # 汇总统计字典
+    # 当前请求的登录用户 id（由 /api/chat 注入），供按用户隔离的源码索引工具使用。
+    # 默认 None：测试与降级（规则匹配）场景不涉及源码查询。
+    user_id: int | None = None
 
     @property
     def total_lines(self) -> int:
