@@ -106,6 +106,43 @@ body {
 }
 
 /* ================================================================
+ * 顶部导航 Tab 栏（日志分析 / 组件管理）
+ * ================================================================ */
+.app-nav {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.app-nav-tab {
+  padding: 8px 18px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  font-family: var(--font-body);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.app-nav-tab:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary);
+}
+
+.app-nav-tab.active {
+  color: var(--accent-data);
+  border-color: rgba(0, 229, 255, 0.4);
+  background: rgba(0, 229, 255, 0.08);
+}
+
+.app-nav-tab:active {
+  animation: btnPress 0.25s ease-out;
+}
+
+/* ================================================================
  * 应用主体布局（侧边栏 + 主内容区）
  * ================================================================ */
 .app-layout {

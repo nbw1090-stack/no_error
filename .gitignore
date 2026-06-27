@@ -23,6 +23,7 @@ backend/uploads/*
 # 数据目录（运行时生成）
 backend/data/datasets/*.json
 backend/data/sessions/*.json
+backend/data/*.db
 
 # IDE & OS
 .DS_Store

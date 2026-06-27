@@ -1,0 +1,431 @@
+/* ================================================================
+ * ComponentsPanel.css —— 组件注册表管理面板
+ * 遵循 WattVision 深色主题（复用 App.css 中的 CSS 变量与关键帧）
+ * ================================================================ */
+
+.components-panel {
+  width: 100%;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  padding: 20px;
+  animation: fadeIn 0.25s ease-out;
+}
+
+/* ---- 头部 ---- */
+.components-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.components-panel-title {
+  font-family: var(--font-body);
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* ---- 添加组件按钮（accent-data 风格，呼应 .new-session-btn） ---- */
+.add-component-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  background: var(--accent-data);
+  color: #000;
+  border: none;
+  border-radius: 8px;
+  font-family: var(--font-body);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+  transition: background 0.15s, transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.add-component-btn:hover {
+  background: #00d4f0;
+  transform: translate3d(0, -1px, 0);
+}
+
+.add-component-btn:active {
+  animation: btnPress 0.25s ease-out;
+}
+
+.add-component-icon {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* ---- 添加表单 ---- */
+.component-add-form {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+  animation: fadeInUp 0.2s ease-out;
+}
+
+.add-form-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.add-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-family: var(--font-body);
+}
+
+.add-field-grow {
+  flex: 2 1 280px;
+  min-width: 200px;
+}
+
+.add-field-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding-bottom: 10px;
+}
+
+.add-field-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* ---- 通用输入框 ---- */
+.component-input {
+  padding: 8px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 13px;
+  min-width: 120px;
+  transition: border-color 0.15s;
+}
+
+.component-input:focus {
+  outline: none;
+  border-color: var(--accent-data);
+}
+
+.component-input-mono {
+  font-family: var(--font-mono);
+}
+
+/* ---- 通用按钮 ---- */
+.component-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 7px 14px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+
+.component-btn:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--text-secondary);
+}
+
+.component-btn:active {
+  animation: btnPress 0.25s ease-out;
+}
+
+.component-btn.primary {
+  background: var(--accent-data);
+  color: #000;
+  border-color: var(--accent-data);
+}
+
+.component-btn.primary:hover {
+  background: #00d4f0;
+  border-color: #00d4f0;
+}
+
+.component-btn.danger {
+  color: var(--accent-alert);
+  border-color: rgba(255, 69, 58, 0.4);
+}
+
+.component-btn.danger:hover {
+  background: rgba(255, 69, 58, 0.08);
+  border-color: var(--accent-alert);
+}
+
+.component-btn.small {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+/* ---- 表单操作区 ---- */
+.add-form-actions,
+.cell-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---- 表单错误提示 ---- */
+.add-form-error {
+  margin-top: 10px;
+  color: var(--accent-alert);
+  font-size: 12px;
+}
+
+.row-inline-error {
+  color: var(--accent-alert);
+  font-size: 11px;
+  margin-left: 4px;
+}
+
+/* ---- 加载 / 空 / 错误状态 ---- */
+.components-panel-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 16px;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.components-panel-error {
+  color: var(--accent-alert);
+}
+
+.components-panel-hint {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+/* ---- 表格容器（可滚动） ---- */
+.components-table-wrap {
+  max-height: 70vh;
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+}
+
+.components-table-wrap::-webkit-scrollbar {
+  width: 4px;
+}
+
+.components-table-wrap::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 2px;
+}
+
+/* ---- 表格 ---- */
+.components-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-body);
+  font-size: 13px;
+}
+
+.components-table thead {
+  position: sticky;
+  top: 0;
+  background: var(--bg-card);
+  z-index: 1;
+}
+
+.components-table th {
+  text-align: left;
+  padding: 12px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+
+.components-row td {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+
+.components-row:last-child td {
+  border-bottom: none;
+}
+
+.components-row:hover td {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.components-row-editing td {
+  background: rgba(0, 229, 255, 0.04);
+}
+
+/* ---- 单元格 ---- */
+.cell-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.cell-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.cell-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+/* ---- 是否可用 开关徽章 ---- */
+.toggle-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  cursor: pointer;
+  background: var(--bg-primary);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.toggle-badge.on {
+  background: rgba(50, 215, 75, 0.08);
+  border-color: rgba(50, 215, 75, 0.4);
+}
+
+.toggle-badge.off {
+  background: rgba(255, 255, 255, 0.02);
+  border-color: var(--border-subtle);
+}
+
+.toggle-knob {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+
+.toggle-badge.on .toggle-knob {
+  background: var(--accent-ok);
+  box-shadow: 0 0 6px var(--accent-ok);
+}
+
+.toggle-badge.off .toggle-knob {
+  background: var(--text-secondary);
+}
+
+.toggle-text {
+  font-size: 12px;
+  font-family: var(--font-body);
+  white-space: nowrap;
+}
+
+.toggle-badge.on .toggle-text {
+  color: var(--accent-ok);
+}
+
+.toggle-badge.off .toggle-text {
+  color: var(--text-secondary);
+}
+
+/* ---- 删除二次确认 ---- */
+.delete-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.confirm-text {
+  font-size: 11px;
+  color: var(--accent-alert);
+  white-space: nowrap;
+}
+
+.confirm-yes,
+.confirm-no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+}
+
+.confirm-yes {
+  color: #fff;
+  background: var(--accent-alert);
+}
+
+.confirm-yes:hover {
+  background: #ff7875;
+  transform: scale(1.1);
+}
+
+.confirm-no {
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.confirm-no:hover {
+  background: rgba(255, 255, 255, 0.15);
+  transform: scale(1.1);
+}
+
+/* ---- 响应式：窄屏表格横向滚动 ---- */
+@media (max-width: 900px) {
+  .components-table-wrap {
+    overflow-x: auto;
+  }
+
+  .components-table {
+    min-width: 640px;
+  }
+
+  .add-form-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .add-field,
+  .add-field-grow {
+    width: 100%;
+  }
+}

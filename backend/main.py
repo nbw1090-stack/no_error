@@ -33,6 +33,9 @@ from agent.core import Agent
 from agent.dataset import LogDataset
 from observability import init_observability, get_client
 
+# 组件注册表（SQLite，纯标准库）
+import db as component_db
+
 # 触发工具注册（导入即注册）
 import agent.tools  # noqa: F401
 
@@ -90,6 +93,13 @@ agent = Agent(
 DATASETS_DIR = os.path.join(config.data_dir, "datasets")
 os.makedirs(DATASETS_DIR, exist_ok=True)
 
+# 组件注册表 DB（置于 data_dir 下）；初始化失败不应阻断应用启动
+component_db.set_db_path(os.path.join(config.data_dir, "components.db"))
+try:
+    component_db.init_db()
+except Exception as e:
+    logger.warning("Components DB init failed: %s. Components API may be unavailable.", e)
+
 # ============================================================
 # 请求模型
 # ============================================================
@@ -104,6 +114,21 @@ class ChatRequest(BaseModel):
 class CreateSessionRequest(BaseModel):
     """创建会话请求"""
     dataset_id: str
+
+
+class ComponentCreate(BaseModel):
+    """新建组件请求"""
+    name: str
+    git_url: str = ""
+    branch: str = "main"
+    enabled: bool = True
+
+
+class ComponentUpdate(BaseModel):
+    """更新组件请求"""
+    git_url: str = ""
+    branch: str = "main"
+    enabled: bool = True
 
 
 # ============================================================
@@ -839,6 +864,72 @@ async def delete_session(session_id: str):
     deleted = session_manager.delete(session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found")
+    return {"deleted": True}
+
+
+# ============================================================
+# 组件管理 API
+# ============================================================
+# 所有 DB 调用经 asyncio.to_thread 交给线程池，避免阻塞事件循环。
+# 测试通过 db.set_db_path() 重定向 COMPONENTS_DB_PATH 即可隔离。
+
+
+@app.get("/api/components")
+async def list_components():
+    """列出全部注册组件"""
+    components = await asyncio.to_thread(component_db.list_components)
+    return {"components": components}
+
+
+@app.post("/api/components", status_code=201)
+async def create_component(req: ComponentCreate):
+    """新建组件；主键冲突返回 409"""
+    try:
+        component = await asyncio.to_thread(
+            component_db.create_component,
+            req.name,
+            req.git_url,
+            req.branch,
+            req.enabled,
+        )
+    except ValueError:
+        raise HTTPException(status_code=409, detail="Component already exists")
+    return component
+
+
+@app.put("/api/components/{name}")
+async def update_component(name: str, req: ComponentUpdate):
+    """更新指定组件；不存在返回 404"""
+    try:
+        component = await asyncio.to_thread(
+            component_db.update_component,
+            name,
+            req.git_url,
+            req.branch,
+            req.enabled,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Component not found")
+    return component
+
+
+@app.patch("/api/components/{name}/toggle")
+async def toggle_component(name: str):
+    """翻转组件 enabled 状态；不存在返回 404"""
+    try:
+        component = await asyncio.to_thread(component_db.toggle_component, name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Component not found")
+    return component
+
+
+@app.delete("/api/components/{name}")
+async def delete_component(name: str):
+    """删除组件；不存在返回 404"""
+    try:
+        await asyncio.to_thread(component_db.delete_component, name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Component not found")
     return {"deleted": True}
 
 

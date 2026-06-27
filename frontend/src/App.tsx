@@ -33,6 +33,7 @@ import LogTable from './components/LogTable';
 import StatsPanel from './components/StatsPanel';
 import ChatPanel from './components/ChatPanel';
 import SessionSidebar from './components/SessionSidebar';
+import ComponentsPanel from './components/ComponentsPanel';
 
 const SESSION_STORAGE_KEY = 'bmc_session_id';
 
@@ -47,6 +48,9 @@ export default function App() {
     level: 'ALL',
     search: '',
   });
+
+  // ---- 视图切换：日志分析（仪表盘）/ 组件管理 ----
+  const [view, setView] = useState<'dashboard' | 'components'>('dashboard');
 
   // ---- 会话状态 ----
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -345,82 +349,103 @@ export default function App() {
         </div>
       </header>
 
-      {/* 主体布局：侧边栏 + 主内容区 */}
-      <div className="app-layout">
-        <SessionSidebar
-          sessions={sessions}
-          activeSessionId={activeSessionId}
-          onSelectSession={handleSelectSession}
-          onNewSession={handleNewSession}
-          onDeleteSession={handleDeleteSession}
-          loading={sessionsLoading}
-        />
+      {/* 顶部导航：日志分析 / 组件管理 */}
+      <nav className="app-nav">
+        <button
+          className={`app-nav-tab ${view === 'dashboard' ? 'active' : ''}`}
+          onClick={() => setView('dashboard')}
+        >
+          日志分析
+        </button>
+        <button
+          className={`app-nav-tab ${view === 'components' ? 'active' : ''}`}
+          onClick={() => setView('components')}
+        >
+          组件管理
+        </button>
+      </nav>
 
-        <div className="main-area">
-          {/* 上传区域（无活跃数据集时显示） */}
-          {showUpload && (
-            <UploadZone
-              onFile={handleUploadStream}
-              onError={handleError}
-              streamState={parseStream}
-            />
-          )}
+      {/* 组件管理视图：全宽渲染，隐藏侧边栏与仪表盘 */}
+      {view === 'components' ? (
+        <ComponentsPanel />
+      ) : (
+        /* 主体布局：侧边栏 + 主内容区 */
+        <div className="app-layout">
+          <SessionSidebar
+            sessions={sessions}
+            activeSessionId={activeSessionId}
+            onSelectSession={handleSelectSession}
+            onNewSession={handleNewSession}
+            onDeleteSession={handleDeleteSession}
+            loading={sessionsLoading}
+          />
 
-          {/* 全局错误提示 */}
-          {error && (
-            <div className="error-message" style={{ marginBottom: 24 }}>
-              {error}
-            </div>
-          )}
-
-          {/* 数据集 summary 加载中（切会话 / 恢复时，避免渲染陈旧数据） */}
-          {activeDatasetId && !summary && !error && (
-            <div className="dashboard-loading">
-              <div className="spinner" />
-              <p>正在加载会话数据...</p>
-            </div>
-          )}
-
-          {/* 数据集就绪后展示仪表盘 */}
-          {summary && activeDatasetId && (
-            <>
-              <KpiCards key={`kpi-${activeDatasetId}`} summary={summary} />
-
-              {/* 筛选栏：全宽置于两列之上，使下方日志表与组件分布等高对齐 */}
-              <FilterBar
-                summary={summary}
-                filters={filters}
-                onFiltersChange={setFilters}
+          <div className="main-area">
+            {/* 上传区域（无活跃数据集时显示） */}
+            {showUpload && (
+              <UploadZone
+                onFile={handleUploadStream}
+                onError={handleError}
+                streamState={parseStream}
               />
+            )}
 
-              <div className="main-content" key={`main-${activeDatasetId}`}>
-                <div className="left-panel">
-                  <LogTable
-                    datasetId={activeDatasetId}
-                    filters={filters}
-                    total={summary.totalLines}
-                    loadingHint={streaming}
-                  />
-                </div>
-                <div className="right-panel">
-                  <StatsPanel summary={summary} />
-                </div>
+            {/* 全局错误提示 */}
+            {error && (
+              <div className="error-message" style={{ marginBottom: 24 }}>
+                {error}
               </div>
+            )}
 
-              {/* Agent 对话窗口 */}
-              {activeSessionId && sessionRestored && (
-                <div className="chat-section">
-                  <ChatPanel
-                    key={activeSessionId}
-                    sessionId={activeSessionId}
-                    initialMessages={preloadedMessages}
-                  />
+            {/* 数据集 summary 加载中（切会话 / 恢复时，避免渲染陈旧数据） */}
+            {activeDatasetId && !summary && !error && (
+              <div className="dashboard-loading">
+                <div className="spinner" />
+                <p>正在加载会话数据...</p>
+              </div>
+            )}
+
+            {/* 数据集就绪后展示仪表盘 */}
+            {summary && activeDatasetId && (
+              <>
+                <KpiCards key={`kpi-${activeDatasetId}`} summary={summary} />
+
+                {/* 筛选栏：全宽置于两列之上，使下方日志表与组件分布等高对齐 */}
+                <FilterBar
+                  summary={summary}
+                  filters={filters}
+                  onFiltersChange={setFilters}
+                />
+
+                <div className="main-content" key={`main-${activeDatasetId}`}>
+                  <div className="left-panel">
+                    <LogTable
+                      datasetId={activeDatasetId}
+                      filters={filters}
+                      total={summary.totalLines}
+                      loadingHint={streaming}
+                    />
+                  </div>
+                  <div className="right-panel">
+                    <StatsPanel summary={summary} />
+                  </div>
                 </div>
-              )}
-            </>
-          )}
+
+                {/* Agent 对话窗口 */}
+                {activeSessionId && sessionRestored && (
+                  <div className="chat-section">
+                    <ChatPanel
+                      key={activeSessionId}
+                      sessionId={activeSessionId}
+                      initialMessages={preloadedMessages}
+                    />
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

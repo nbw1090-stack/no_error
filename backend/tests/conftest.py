@@ -294,6 +294,7 @@ def tmp_data(tmp_path, monkeypatch):
     避免污染真实 backend/data。
     """
     import main
+    import db
 
     datasets_dir = tmp_path / "datasets"
     sessions_dir = tmp_path / "sessions"
@@ -304,7 +305,18 @@ def tmp_data(tmp_path, monkeypatch):
     monkeypatch.setattr(
         main, "session_manager", main.SessionManager(str(sessions_dir))
     )
-    return {"main": main, "datasets": datasets_dir, "sessions": sessions_dir}
+
+    # 组件 DB 同样重定向到 tmp_path，避免污染真实 backend/data/components.db
+    components_db_path = str(tmp_path / "components.db")
+    db.set_db_path(components_db_path)
+    db.init_db()  # 重新播种，保证每个测试从已播种状态开始
+
+    return {
+        "main": main,
+        "datasets": datasets_dir,
+        "sessions": sessions_dir,
+        "components_db": components_db_path,
+    }
 
 
 @pytest.fixture

@@ -13,6 +13,7 @@ import type {
   SessionDetail,
   StreamEvent,
 } from '../types/log';
+import type { ComponentInfo } from '../types/component';
 
 const API_BASE = '/api';
 
@@ -283,5 +284,107 @@ export async function deleteSession(sessionId: string): Promise<void> {
 
   if (!response.ok) {
     throw new Error('删除会话失败');
+  }
+}
+
+// ============================================================
+// 组件注册表 API
+// ============================================================
+
+/**
+ * 列出所有已注册组件
+ */
+export async function listComponents(): Promise<ComponentInfo[]> {
+  const response = await fetch(`${API_BASE}/components`);
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    throw new Error(errorData?.detail || '获取组件列表失败');
+  }
+
+  const data = await response.json();
+  return data.components;
+}
+
+/**
+ * 创建新组件
+ */
+export async function createComponent(
+  comp: Omit<ComponentInfo, never>,
+): Promise<ComponentInfo> {
+  const response = await fetch(`${API_BASE}/components`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(comp),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    if (response.status === 409) {
+      throw new Error('组件已存在');
+    }
+    throw new Error(errorData?.detail || '创建组件失败');
+  }
+
+  return response.json();
+}
+
+/**
+ * 更新组件（git_url / branch / enabled）
+ */
+export async function updateComponent(
+  name: string,
+  comp: Pick<ComponentInfo, 'git_url' | 'branch' | 'enabled'>,
+): Promise<ComponentInfo> {
+  const response = await fetch(`${API_BASE}/components/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(comp),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    if (response.status === 404) {
+      throw new Error('组件不存在');
+    }
+    throw new Error(errorData?.detail || '更新组件失败');
+  }
+
+  return response.json();
+}
+
+/**
+ * 切换组件的 enabled 状态
+ */
+export async function toggleComponent(name: string): Promise<ComponentInfo> {
+  const response = await fetch(`${API_BASE}/components/${encodeURIComponent(name)}/toggle`, {
+    method: 'PATCH',
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    if (response.status === 404) {
+      throw new Error('组件不存在');
+    }
+    throw new Error(errorData?.detail || '切换组件状态失败');
+  }
+
+  return response.json();
+}
+
+/**
+ * 删除组件
+ */
+export async function deleteComponent(name: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/components/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    if (response.status === 404) {
+      throw new Error('组件不存在');
+    }
+    throw new Error(errorData?.detail || '删除组件失败');
   }
 }
