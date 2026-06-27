@@ -495,8 +495,80 @@ async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
             "llm_model": config.llm.model,
             "llm_provider": config.llm.provider,
         }
+        # 后端指定 trace id：与本地落盘记录一致，便于对账
+        trace_id = uuid.uuid4().hex
+        session_manager.record_trace(
+            req.session_id, trace_id, name="chat", user_id=user["id"]
+        )
+        logger.info(
+            "Chat trace: session=%s trace_id=%s", req.session_id, trace_id
+        )
+        try:
+            with tracer.observation(
+                name="chat",
+                trace_id=trace_id,
+                session_id=req.session_id,
+                user_id=str(user["id"]),
+                trace_metadata={"username": user["username"]},
+                input={
+                    "message": message,
+                    "session_id": req.session_id,
+                    "dataset_id": session.dataset_id,
+                },
+                metadata=base_metadata,
+            ) as trace:
+                usage: dict = {}
+                try:
+                    reply = await agent.run(
+                        session_id=req.session_id,
+                        user_message=message,
+                        dataset=dataset,
+                        usage=usage,
+                    )
+                    trace.update(
+                        output={"reply": reply[:2000]},
+                        metadata={
+                            **base_metadata,
+                            "total_input_tokens": usage.get("input", 0),
+                            "total_output_tokens": usage.get("output", 0),
+                            "total_tokens": usage.get("total", 0),
+                        },
+                    )
+                except Exception as e:
+                    logger.exception("Agent run failed")
+                    trace.update(
+                        output={"error": str(e)},
+                        level="ERROR",
+                        status_message=str(e)[:200],
+                    )
+                    raise HTTPException(
+                        status_code=500, detail=f"Analysis failed: {str(e)}"
+                    )
+
+            return {
+                "reply": reply,
+                "usage": {
+                    "input": usage.get("input", 0),
+                    "output": usage.get("output", 0),
+                    "total": usage.get("total", 0),
+                },
+            }
+        finally:
+            # 确保 trace 数据立即发送到 Langfuse（异常路径同样上报）
+            tracer.flush()
+
+    # ---- 降级模式：规则匹配 ----
+    logger.info("Agent unavailable, using fallback rule-based reply")
+
+    trace_id = uuid.uuid4().hex
+    session_manager.record_trace(
+        req.session_id, trace_id, name="chat-fallback", user_id=user["id"]
+    )
+    logger.info("Chat trace: session=%s trace_id=%s", req.session_id, trace_id)
+    try:
         with tracer.observation(
-            name="chat",
+            name="chat-fallback",
+            trace_id=trace_id,
             session_id=req.session_id,
             user_id=str(user["id"]),
             trace_metadata={"username": user["username"]},
@@ -505,80 +577,27 @@ async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
                 "session_id": req.session_id,
                 "dataset_id": session.dataset_id,
             },
-            metadata=base_metadata,
+            metadata={
+                "mode": "rule_based",
+                "dataset_entries": len(dataset.entries) if dataset else 0,
+            },
         ) as trace:
-            usage: dict = {}
-            try:
-                reply = await agent.run(
-                    session_id=req.session_id,
-                    user_message=message,
-                    dataset=dataset,
-                    usage=usage,
-                )
-                trace.update(
-                    output={"reply": reply[:2000]},
-                    metadata={
-                        **base_metadata,
-                        "total_input_tokens": usage.get("input", 0),
-                        "total_output_tokens": usage.get("output", 0),
-                        "total_tokens": usage.get("total", 0),
-                    },
-                )
-            except Exception as e:
-                logger.exception("Agent run failed")
-                trace.update(
-                    output={"error": str(e)},
-                    level="ERROR",
-                    status_message=str(e)[:200],
-                )
-                raise HTTPException(
-                    status_code=500, detail=f"Analysis failed: {str(e)}"
-                )
+            reply = _generate_reply(message, dataset.summary if dataset else None)
+            # 将消息记录到会话
+            session_manager.add_message(
+                req.session_id, {"role": "user", "content": message}
+            )
+            session_manager.add_message(
+                req.session_id, {"role": "assistant", "content": reply}
+            )
+            trace.update(output={"reply": reply[:2000]})
 
-        # 确保 trace 数据立即发送到 Langfuse
-        tracer.flush()
         return {
             "reply": reply,
-            "usage": {
-                "input": usage.get("input", 0),
-                "output": usage.get("output", 0),
-                "total": usage.get("total", 0),
-            },
+            "usage": {"input": 0, "output": 0, "total": 0},
         }
-
-    # ---- 降级模式：规则匹配 ----
-    logger.info("Agent unavailable, using fallback rule-based reply")
-
-    with tracer.observation(
-        name="chat-fallback",
-        session_id=req.session_id,
-        user_id=str(user["id"]),
-        trace_metadata={"username": user["username"]},
-        input={
-            "message": message,
-            "session_id": req.session_id,
-            "dataset_id": session.dataset_id,
-        },
-        metadata={
-            "mode": "rule_based",
-            "dataset_entries": len(dataset.entries) if dataset else 0,
-        },
-    ) as trace:
-        reply = _generate_reply(message, dataset.summary if dataset else None)
-        # 将消息记录到会话
-        session_manager.add_message(
-            req.session_id, {"role": "user", "content": message}
-        )
-        session_manager.add_message(
-            req.session_id, {"role": "assistant", "content": reply}
-        )
-        trace.update(output={"reply": reply[:2000]})
-
-    tracer.flush()
-    return {
-        "reply": reply,
-        "usage": {"input": 0, "output": 0, "total": 0},
-    }
+    finally:
+        tracer.flush()
 
 
 # ============================================================
@@ -631,8 +650,19 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(get_current_user)):
                     "llm_model": config.llm.model,
                     "llm_provider": config.llm.provider,
                 }
+                trace_id = uuid.uuid4().hex
+                session_manager.record_trace(
+                    req.session_id,
+                    trace_id,
+                    name="chat-stream",
+                    user_id=user["id"],
+                )
+                logger.info(
+                    "Chat trace: session=%s trace_id=%s", req.session_id, trace_id
+                )
                 with tracer.observation(
                     name="chat-stream",
+                    trace_id=trace_id,
                     session_id=req.session_id,
                     user_id=str(user["id"]),
                     trace_metadata={"username": user["username"]},
@@ -669,22 +699,51 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(get_current_user)):
                 logger.info(
                     "Agent unavailable, using fallback rule-based reply [stream]"
                 )
-                reply = _generate_reply(message, dataset.summary if dataset else None)
-                session_manager.add_message(
+                trace_id = uuid.uuid4().hex
+                session_manager.record_trace(
                     req.session_id,
-                    {"role": "user", "content": message},
+                    trace_id,
+                    name="chat-fallback",
+                    user_id=user["id"],
                 )
-                session_manager.add_message(
-                    req.session_id,
-                    {"role": "assistant", "content": reply},
+                logger.info(
+                    "Chat trace: session=%s trace_id=%s", req.session_id, trace_id
                 )
-                # 逐词输出降级回复
-                words = reply.split(" ")
-                for i, word in enumerate(words):
-                    separator = " " if i < len(words) - 1 else ""
-                    yield f"data: {json.dumps({'type': 'delta', 'text': word + separator}, ensure_ascii=False)}\n\n"
-                    await asyncio.sleep(0.01)
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                with tracer.observation(
+                    name="chat-fallback",
+                    trace_id=trace_id,
+                    session_id=req.session_id,
+                    user_id=str(user["id"]),
+                    trace_metadata={"username": user["username"]},
+                    input={
+                        "message": message,
+                        "session_id": req.session_id,
+                        "dataset_id": session.dataset_id,
+                    },
+                    metadata={
+                        "mode": "rule_based",
+                        "dataset_entries": len(dataset.entries) if dataset else 0,
+                    },
+                ) as trace:
+                    reply = _generate_reply(
+                        message, dataset.summary if dataset else None
+                    )
+                    session_manager.add_message(
+                        req.session_id,
+                        {"role": "user", "content": message},
+                    )
+                    session_manager.add_message(
+                        req.session_id,
+                        {"role": "assistant", "content": reply},
+                    )
+                    # 逐词输出降级回复
+                    words = reply.split(" ")
+                    for i, word in enumerate(words):
+                        separator = " " if i < len(words) - 1 else ""
+                        yield f"data: {json.dumps({'type': 'delta', 'text': word + separator}, ensure_ascii=False)}\n\n"
+                        await asyncio.sleep(0.01)
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    trace.update(output={"reply": reply[:2000]})
 
         except Exception as e:
             logger.exception("Stream error")
@@ -694,7 +753,12 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(get_current_user)):
             yield f"data: {error_event}\n\n"
 
         finally:
-            tracer.flush()
+            try:
+                tracer.flush()
+            except Exception:
+                logger.warning(
+                    "tracer.flush() in stream finally failed", exc_info=True
+                )
 
     return StreamingResponse(
         event_generator(),

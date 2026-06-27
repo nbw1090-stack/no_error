@@ -50,6 +50,7 @@ class ObservabilityClient:
         user_id: str | None = None,
         session_id: str | None = None,
         trace_metadata: dict | None = None,
+        trace_id: str | None = None,
     ):
         """
         创建一个 observation（自动嵌套到当前上下文中）。
@@ -58,13 +59,19 @@ class ObservabilityClient:
         （react-iteration / tool / llm-generation）都会带上 user.id / session.id
         OTEL 属性——这是 Langfuse「按用户/会话聚合 token 成本」等分析的必要条件。
         当 enabled=False 时自动降级为空操作。
+
+        trace_id：可选，由调用方指定的 32 位十六进制 OTEL trace id（如
+        uuid4().hex）。传入后 Langfuse 上的 trace 与本地落盘记录用同一个 id，
+        便于对账——排查「某轮对话为何没出现在 Langfuse」时直接拿它去搜。
+        内层子 observation（react-iteration / tool）不传 trace_id，会自动继承
+        同一 trace（OTEL 上下文传播），故整条链路共用这个 id。
         """
         if not self.enabled:
             yield _NoopObservation()
             return
 
         try:
-            with self._langfuse.start_as_current_observation(
+            kwargs = dict(
                 name=name,
                 as_type=as_type,
                 input=input,
@@ -74,7 +81,12 @@ class ObservabilityClient:
                 usage_details=usage_details,
                 level=level,
                 status_message=status_message,
-            ) as obs:
+            )
+            if trace_id:
+                # Langfuse v4 用 trace_context 指定 trace id；SDK 会把该 span
+                # 标记为 root（AS_ROOT=True），整条链路共用此 id。
+                kwargs["trace_context"] = {"trace_id": trace_id}
+            with self._langfuse.start_as_current_observation(**kwargs) as obs:
                 # 尽早传播 trace 级属性：必须在子节点（LLM 调用等）生成之前激活，
                 # 否则早于此处的 observation 不会被纳入按 user/session 的聚合。
                 if user_id or session_id or trace_metadata:

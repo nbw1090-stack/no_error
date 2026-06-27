@@ -36,6 +36,9 @@ class Session:
     messages: list[dict] = field(default_factory=list)
     user_id: int = 0  # 归属用户 ID（0 表示无归属 / 历史数据）
     username: str = ""  # 归属用户名（便于排查，不参与隔离判定）
+    # 每轮对话的 Langfuse trace 元数据（独立于 messages，不进回放给 LLM 的历史）。
+    # 用于本地对账：trace_id 在此但 Langfuse 搜不到 = 未上报（disabled 或丢失）。
+    traces: list[dict] = field(default_factory=list)
     # 每条消息格式：{"role": "user"|"assistant"|"tool", "content": ...,
     #                "tool_calls": [...], "tool_call_id": ...}
 
@@ -170,6 +173,29 @@ class SessionManager:
         self._save(session)
         return session
 
+    def record_trace(
+        self, session_id: str, trace_id: str, name: str, user_id: int | None = None
+    ) -> Session | None:
+        """
+        记录一轮对话的 Langfuse trace id（独立于 messages，不进 LLM 历史）。
+
+        name 形如 "chat" / "chat-stream" / "chat-fallback"，区分上报路径。
+        归属校验失败返回 None（与 get 一致，不泄漏其他用户会话）。
+        """
+        session = self.get(session_id, user_id)
+        if session is None:
+            return None
+        session.traces.append(
+            {
+                "trace_id": trace_id,
+                "name": name,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        session.updated_at = datetime.now(timezone.utc).isoformat()
+        self._save(session)
+        return session
+
     def list_all(self, user_id: int | None = None) -> list[dict]:
         """
         列出会话（仅元数据，不含消息体），按更新时间降序。
@@ -245,6 +271,7 @@ class SessionManager:
             "messages": session.messages,
             "user_id": session.user_id,
             "username": session.username,
+            "traces": session.traces,
         }
         with open(path, "w") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
