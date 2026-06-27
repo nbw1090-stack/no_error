@@ -120,23 +120,43 @@ body {
 }
 
 /* ================================================================
- * 主内容区（FilterBar + StatsPanel 左右布局）
+ * 主内容区（日志表 + 组件错误分布 左右等高布局）
+ *
+ * FilterBar 已上移为全宽，这里只剩两列：左 LogTable、右 StatsPanel。
+ * 给容器一个确定高度（70vh，与 LogTable 原有的 max-height 一致），
+ * 左右两列各自 stretch 撑满该高度并在内部滚动 ——
+ * 无论数据多少，两列高度严格相等，不再因一方内容更高而错位留白。
  * ================================================================ */
 .main-content {
   display: flex;
   gap: 24px;
-  margin-top: 24px;
-  align-items: flex-start;
+  align-items: stretch;
+  height: 70vh;
+  min-height: 360px;
 }
 
 .main-content .left-panel {
   flex: 1;
   min-width: 0;
+  display: flex;
 }
 
 .main-content .right-panel {
   width: 380px;
   flex-shrink: 0;
+  display: flex;
+}
+
+/* 数据集加载占位（切会话 / 恢复时） */
+.dashboard-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 80px 24px;
+  color: var(--text-secondary);
+  font-size: 14px;
 }
 
 /* ================================================================
@@ -166,6 +186,45 @@ body {
 }
 
 /* ================================================================
+ * 通用动画关键帧
+ * ================================================================ */
+
+/* 按钮按压弹跳动画（GPU 加速） */
+@keyframes btnPress {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  40% {
+    transform: translate3d(0, 0, 0) scale(0.93);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+/* 淡入上浮 */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 16px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+/* 淡入 */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ================================================================
  * 响应式适配
  * ================================================================ */
 @media (max-width: 900px) {
@@ -175,6 +234,9 @@ body {
 
   .main-content {
     flex-direction: column;
+    /* 窄屏改为纵向堆叠：解除固定行高，让两块按各自内容自然展开 */
+    height: auto;
+    min-height: 0;
   }
 
   .main-content .right-panel {

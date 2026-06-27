@@ -1,11 +1,14 @@
 /* LogTable 组件样式 */
 
 .log-table-container {
+  flex: 1;
+  min-width: 0;
   max-height: 70vh;
   overflow-y: auto;
   border-radius: 16px;
   border: 1px solid var(--border-subtle);
   background: var(--bg-card);
+  animation: fadeIn 0.4s ease-out 0.15s both;
 }
 
 .log-table {

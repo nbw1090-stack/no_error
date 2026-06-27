@@ -7,6 +7,8 @@ OpenAI 兼容适配器
 
 import logging
 import time
+from typing import AsyncGenerator
+
 from openai import AsyncOpenAI
 
 from config import LLMConfig
@@ -136,6 +138,144 @@ class OpenAIAdapter(BaseLLMAdapter):
             "content": choice.message.content,
             "tool_calls": tool_calls,
         }
+
+    async def chat_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        """
+        流式发送消息，逐个 yield 标准化事件（content_delta/tool_call/done）。
+
+        tool_calls 按 index 累积分片，finish_reason 后才整体放入 done.tool_calls，
+        避免 arguments 半截 JSON 导致下游 json.loads 失败。
+        """
+        from observability import get_client
+
+        kwargs = dict(
+            model=self.model,
+            messages=messages,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
+        logger.debug(
+            "LLM stream request: model=%s, messages=%d, tools=%d",
+            self.model,
+            len(messages),
+            len(tools) if tools else 0,
+        )
+
+        tracer = get_client()
+        start_time = time.time()
+
+        with tracer.observation(
+            name="llm-chat-stream",
+            as_type="generation",
+            model=self.model,
+            input={
+                "messages_count": len(messages),
+                "tools_count": len(tools) if tools else 0,
+                "messages": _safe_serialize_messages(messages),
+                "tools": tools,
+            },
+            metadata={
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+                "stream": True,
+            },
+        ) as generation:
+            content_parts: list[str] = []
+            # tool_calls 分片累积：{index: {id, type, function:{name, arguments}}}
+            tool_calls_acc: dict[int, dict] = {}
+            finish_reason: str | None = None
+            usage_details: dict | None = None
+
+            try:
+                stream = await self.client.chat.completions.create(**kwargs)
+                async for chunk in stream:
+                    # 末尾 usage chunk（无 choices）
+                    if not chunk.choices:
+                        if chunk.usage:
+                            usage_details = {
+                                "input": chunk.usage.prompt_tokens or 0,
+                                "output": chunk.usage.completion_tokens or 0,
+                                "total": chunk.usage.total_tokens or 0,
+                            }
+                        continue
+
+                    delta = chunk.choices[0].delta
+
+                    # 文本增量：立即转发（真流式）
+                    if delta.content:
+                        content_parts.append(delta.content)
+                        yield {"type": "content_delta", "text": delta.content}
+
+                    # 工具调用分片：按 index 累积
+                    if delta.tool_calls:
+                        for tc_delta in delta.tool_calls:
+                            idx = tc_delta.index
+                            slot = tool_calls_acc.setdefault(
+                                idx,
+                                {
+                                    "id": "",
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                },
+                            )
+                            if tc_delta.id:
+                                slot["id"] = tc_delta.id
+                            if tc_delta.type:
+                                slot["type"] = tc_delta.type
+                            fn = tc_delta.function
+                            if fn and fn.name:
+                                slot["function"]["name"] += fn.name
+                            if fn and fn.arguments:
+                                slot["function"]["arguments"] += fn.arguments
+
+                    if chunk.choices[0].finish_reason:
+                        finish_reason = chunk.choices[0].finish_reason
+            except Exception as e:
+                generation.update(status_message=str(e), level="ERROR")
+                raise
+
+            # 按索引排序得到完整 tool_calls 列表
+            tool_calls = None
+            if tool_calls_acc:
+                tool_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
+
+            full_content = "".join(content_parts)
+            duration_ms = (time.time() - start_time) * 1000
+
+            generation.update(
+                output={
+                    "content": full_content,
+                    "tool_calls": [
+                        {
+                            "name": tc["function"]["name"],
+                            "arguments": tc["function"]["arguments"],
+                        }
+                        for tc in (tool_calls or [])
+                    ],
+                },
+                usage_details=usage_details,
+                metadata={
+                    "finish_reason": finish_reason,
+                    "duration_ms": round(duration_ms, 2),
+                },
+            )
+
+            yield {
+                "type": "done",
+                "finish_reason": finish_reason or "stop",
+                "content": full_content,
+                "tool_calls": tool_calls,
+            }
 
 
 def _safe_serialize_messages(messages: list[dict]) -> list[dict]:

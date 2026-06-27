@@ -13,6 +13,7 @@
   border: 1px solid var(--border-subtle);
   border-radius: 16px;
   overflow: hidden;
+  animation: fadeInUp 0.4s ease-out both;
 }
 
 /* ---- 面板头部 ---- */
@@ -134,12 +135,20 @@
   border-radius: 16px;
   padding: 6px 14px;
   cursor: pointer;
-  transition: background 0.2s, border-color 0.2s;
+  will-change: transform, background;
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+  transition: background 0.15s, border-color 0.15s, transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .chat-empty .chat-suggestion:hover {
   background: rgba(0, 229, 255, 0.15);
   border-color: rgba(0, 229, 255, 0.3);
+  transform: translate3d(0, -1px, 0);
+}
+
+.chat-empty .chat-suggestion:active {
+  animation: btnPress 0.25s ease-out;
 }
 
 /* ================================================================
@@ -309,17 +318,20 @@
   color: #121212;
   font-size: 16px;
   cursor: pointer;
-  transition: background 0.2s, transform 0.15s, opacity 0.2s;
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+  transition: background 0.15s, transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s;
   flex-shrink: 0;
 }
 
 .chat-input-area .chat-send-btn:hover:not(:disabled) {
   background: #00D0E8;
-  transform: scale(1.05);
+  transform: translate3d(0, 0, 0) scale(1.05);
 }
 
 .chat-input-area .chat-send-btn:active:not(:disabled) {
-  transform: scale(0.95);
+  animation: btnPress 0.3s ease-out;
 }
 
 .chat-input-area .chat-send-btn:disabled {
@@ -344,17 +356,20 @@
   color: #fff;
   font-size: 14px;
   cursor: pointer;
-  transition: background 0.2s, transform 0.15s;
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+  transition: background 0.15s, transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1);
   flex-shrink: 0;
 }
 
 .chat-input-area .chat-stop-btn:hover {
   background: #C62828;
-  transform: scale(1.05);
+  transform: translate3d(0, 0, 0) scale(1.05);
 }
 
 .chat-input-area .chat-stop-btn:active {
-  transform: scale(0.95);
+  animation: btnPress 0.3s ease-out;
 }
 
 .chat-input-area .chat-stop-btn .stop-icon {

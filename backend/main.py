@@ -11,6 +11,7 @@ FastAPI 应用入口
 - GET  /api/health       健康检查
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -18,7 +19,7 @@ import uuid
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from extractor import extract_logs
@@ -80,6 +81,7 @@ agent = Agent(
     llm=llm,
     session_manager=session_manager,
     max_iterations=config.max_tool_iterations,
+    max_history=config.max_history_messages,
 ) if llm else None
 
 # ============================================================
@@ -121,10 +123,26 @@ app.add_middleware(
 )
 
 # ============================================================
-# 上传目录（相对于 backend/ 目录）
+# 辅助函数
 # ============================================================
-UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+def atomic_write_json(path: str, data: dict) -> None:
+    """
+    原子写入 JSON：先写临时文件 → fsync → os.replace 原子替换。
+
+    保证并发读盘的端点（如 /api/chat 每次请求 json.load）绝不会读到
+    写到一半的半成品 JSON。os.replace 在同文件系统内是原子的。
+    """
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(data, f, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+
+
+def sse(event: dict) -> str:
+    """将事件 dict 序列化为 SSE data 行。"""
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
 # ============================================================
@@ -152,7 +170,6 @@ async def parse_log(file: UploadFile = File(...)):
     流程：保存文件 → 解压提取 → 解析日志 → 持久化数据集 → 清理临时文件。
     """
     tracer = get_client()
-    temp_path = None
 
     with tracer.observation(
         name="parse-log",
@@ -162,16 +179,11 @@ async def parse_log(file: UploadFile = File(...)):
         },
     ) as parse_trace:
         try:
-            # ---- 1. 保存上传文件到临时目录 ----
-            safe_filename = file.filename or "dump_info.tar.gz"
-            temp_path = os.path.join(UPLOAD_DIR, safe_filename)
-
-            with open(temp_path, "wb") as buffer:
-                content = await file.read()
-                buffer.write(content)
+            # ---- 1. 读取上传文件（内存处理，不落盘）----
+            content = await file.read()
 
             # ---- 2. 解压提取日志内容 ----
-            app_content, framework_content = extract_logs(temp_path)
+            app_content, framework_content = extract_logs(content)
 
             # ---- 3. 解析日志 ----
             result = parse_logs(app_content, framework_content)
@@ -184,8 +196,7 @@ async def parse_log(file: UploadFile = File(...)):
                 "entries": result["entries"],
                 "summary": result["summary"],
             }
-            with open(dataset_path, "w") as f:
-                json.dump(dataset_data, f, ensure_ascii=False)
+            atomic_write_json(dataset_path, dataset_data)
 
             logger.info(
                 "Dataset saved: %s (%d entries)",
@@ -236,13 +247,115 @@ async def parse_log(file: UploadFile = File(...)):
                 },
             )
 
-        finally:
-            # ---- 6. 清理临时文件 ----
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
+
+# ============================================================
+# 日志解析（SSE 流式输出）
+# ============================================================
+@app.post("/api/parse/stream")
+async def parse_log_stream(file: UploadFile = File(...)):
+    """
+    上传并解析 tar.gz 日志压缩包（SSE 流式版本）。
+
+    与 /api/parse 解析流程相同，但通过 Server-Sent Events 渐进推送，
+    让前端可以边解析边渲染：
+
+        progress(extracting) → progress(parsing) → summary →
+        entries_chunk × N → done
+
+    不变量：summary 事件到达 ⟺ dataset.json 已完整原子落盘。
+    因此前端收到 summary 即可安全创建会话，chat 端点读盘也绝不会拿到半成品。
+    """
+    tracer = get_client()
+
+    # ---- 读取上传文件到内存（不落盘）----
+    # 必须在 generator 外完成：StreamingResponse 开始迭代时底层 UploadFile 可能
+    # 已被关闭，在 generator 内 await file.read() 会抛 "read of closed file"。
+    content = await file.read()
+
+    async def event_generator():
+        with tracer.observation(
+            name="parse-log-stream",
+            input={
+                "filename": file.filename,
+                "content_type": file.content_type,
+            },
+        ) as parse_trace:
+            try:
+                yield sse({"type": "progress", "stage": "extracting"})
+
+                # ---- 2. 解压提取（线程池，避免阻塞事件循环）----
+                app_content, framework_content = await asyncio.to_thread(
+                    extract_logs, content
+                )
+
+                yield sse({"type": "progress", "stage": "parsing"})
+
+                # ---- 3. 解析日志（线程池）----
+                result = await asyncio.to_thread(
+                    parse_logs, app_content, framework_content
+                )
+                entries = result["entries"]
+                summary = result["summary"]
+
+                # ---- 4. 原子落盘（在推送 summary 之前完成）----
+                dataset_id = uuid.uuid4().hex[:12]
+                dataset_path = os.path.join(DATASETS_DIR, f"{dataset_id}.json")
+                atomic_write_json(
+                    dataset_path,
+                    {
+                        "dataset_id": dataset_id,
+                        "entries": entries,
+                        "summary": summary,
+                    },
+                )
+
+                logger.info(
+                    "Dataset saved [stream]: %s (%d entries)",
+                    dataset_id,
+                    len(entries),
+                )
+                parse_trace.update(
+                    output={
+                        "dataset_id": dataset_id,
+                        "entries_count": len(entries),
+                        "total_lines": summary.get("totalLines", 0),
+                        "error_count": summary.get("errorCount", 0),
+                    },
+                )
+
+                # ---- 5. 推送 summary（落盘已完成，前端据此渲染 KPI 并按需拉首屏 entries）----
+                yield sse(
+                    {
+                        "type": "summary",
+                        "dataset_id": dataset_id,
+                        "summary": summary,
+                    }
+                )
+
+                # ---- 6. 流结束（日志条目由前端经分页接口按需加载）----
+                yield sse({"type": "done", "dataset_id": dataset_id})
+
+            except Exception as e:
+                logger.exception("Parse stream failed")
+                parse_trace.update(
+                    output={"error": str(e)},
+                    level="ERROR",
+                    status_message=str(e)[:200],
+                )
+                yield sse({"type": "error", "message": str(e)})
+
+            finally:
+                tracer.flush()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ============================================================
@@ -275,7 +388,7 @@ async def chat(req: ChatRequest):
 
     dataset = LogDataset(
         entries=data["entries"],
-        summary=data["summary"],
+        summary=_ensure_summary_complete(data["summary"], data["entries"]),
     )
 
     tracer = get_client()
@@ -346,6 +459,113 @@ async def chat(req: ChatRequest):
 
     tracer.flush()
     return {"reply": reply}
+
+
+# ============================================================
+# Agent 对话（SSE 流式输出）
+# ============================================================
+@app.post("/api/chat/stream")
+async def chat_stream(req: ChatRequest):
+    """
+    Agent 对话接口（SSE 流式输出版本）。
+
+    使用 Server-Sent Events 实时推送：工具调用进度 + 逐词回复文本。
+    """
+    message = req.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    # ---- 验证会话存在 ----
+    session = session_manager.get(req.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # ---- 加载数据集 ----
+    dataset_path = os.path.join(DATASETS_DIR, f"{session.dataset_id}.json")
+    if not os.path.exists(dataset_path):
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    with open(dataset_path) as f:
+        data = json.load(f)
+
+    dataset = LogDataset(
+        entries=data["entries"],
+        summary=_ensure_summary_complete(data["summary"], data["entries"]),
+    )
+
+    tracer = get_client()
+
+    async def event_generator():
+        """
+        SSE 事件生成器：将 Agent.run_stream() 的 yield 事件
+        转换为 SSE 格式的字符串。
+        """
+        try:
+            # ---- Agent 流式模式 ----
+            if agent is not None:
+                with tracer.observation(
+                    name="chat-stream",
+                    session_id=req.session_id,
+                    input={
+                        "message": message,
+                        "session_id": req.session_id,
+                        "dataset_id": session.dataset_id,
+                    },
+                    metadata={
+                        "dataset_entries": len(dataset.entries),
+                        "llm_model": config.llm.model,
+                        "llm_provider": config.llm.provider,
+                    },
+                ) as trace:
+                    async for event in agent.run_stream(
+                        session_id=req.session_id,
+                        user_message=message,
+                        dataset=dataset,
+                    ):
+                        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+                    trace.update(output={"status": "stream_complete"})
+            else:
+                # ---- 降级模式：规则匹配 ----
+                logger.info(
+                    "Agent unavailable, using fallback rule-based reply [stream]"
+                )
+                reply = _generate_reply(message, dataset.summary)
+                session_manager.add_message(
+                    req.session_id,
+                    {"role": "user", "content": message},
+                )
+                session_manager.add_message(
+                    req.session_id,
+                    {"role": "assistant", "content": reply},
+                )
+                # 逐词输出降级回复
+                words = reply.split(" ")
+                for i, word in enumerate(words):
+                    separator = " " if i < len(words) - 1 else ""
+                    yield f"data: {json.dumps({'type': 'delta', 'text': word + separator}, ensure_ascii=False)}\n\n"
+                    await asyncio.sleep(0.01)
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        except Exception as e:
+            logger.exception("Stream error")
+            error_event = json.dumps(
+                {"type": "error", "text": str(e)}, ensure_ascii=False
+            )
+            yield f"data: {error_event}\n\n"
+
+        finally:
+            tracer.flush()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _generate_reply(message: str, summary: dict) -> str:
@@ -427,12 +647,45 @@ def _generate_reply(message: str, summary: dict) -> str:
 # ============================================================
 
 
+def _compute_component_errors(entries: list) -> list:
+    """
+    从 entries 按组件聚合 ERROR 数量（Top 20）。
+
+    用于补齐旧数据集 summary 中缺失的 componentErrors 字段：这些数据集由
+    更早版本（尚未统计 componentErrors）的 parser 落盘，磁盘上的 summary
+    没有 componentErrors，导致前端 StatsPanel「组件错误分布为空但实际有值」。
+    """
+    counts: dict[str, int] = {}
+    for e in entries:
+        if e.get("level") == "ERROR":
+            comp = e.get("component")
+            if comp:
+                counts[comp] = counts.get(comp, 0) + 1
+    return [
+        {"name": name, "count": count}
+        for name, count in sorted(
+            counts.items(), key=lambda x: x[1], reverse=True
+        )[:20]
+    ]
+
+
+def _ensure_summary_complete(summary: dict, entries: list) -> dict:
+    """就地补齐 summary 中缺失的 componentErrors（旧数据集兼容），返回 summary。"""
+    if not summary.get("componentErrors"):
+        summary["componentErrors"] = _compute_component_errors(entries)
+    return summary
+
+
 @app.get("/api/datasets/{dataset_id}")
 async def get_dataset(dataset_id: str):
     """
-    获取数据集详情（含日志条目和汇总统计）。
+    获取数据集的汇总统计（summary）。
 
-    用于会话切换时重新加载日志分析数据。
+    日志条目改由分页接口 /api/datasets/{dataset_id}/entries 按需提供，
+    避免一次性传输全量 entries（大日志时首屏卡顿）。
+
+    旧数据集（summary 缺 componentErrors）在此按 entries 现场补齐，
+    保证前端 StatsPanel 始终能拿到组件错误分布。
     """
     dataset_path = os.path.join(DATASETS_DIR, f"{dataset_id}.json")
     if not os.path.exists(dataset_path):
@@ -441,10 +694,86 @@ async def get_dataset(dataset_id: str):
     with open(dataset_path) as f:
         data = json.load(f)
 
+    summary = _ensure_summary_complete(data["summary"], data["entries"])
+
     return {
         "dataset_id": data["dataset_id"],
-        "entries": data["entries"],
-        "summary": data["summary"],
+        "summary": summary,
+    }
+
+
+def _load_filter_page(
+    dataset_path: str,
+    offset: int,
+    limit: int,
+    component: str | None,
+    level: str | None,
+    search: str | None,
+) -> tuple[list, int, bool]:
+    """
+    加载数据集并按筛选条件过滤 + 分页（在线程池中执行，避免阻塞事件循环）。
+
+    筛选逻辑与前端原 filteredEntries 一致。
+    """
+    with open(dataset_path) as f:
+        data = json.load(f)
+
+    entries = data["entries"]
+
+    if component:
+        entries = [e for e in entries if e["component"] == component]
+    if level and level != "ALL":
+        entries = [e for e in entries if e["level"] == level]
+    if search:
+        keyword = search.lower()
+        entries = [
+            e for e in entries if keyword in (e["message"] or "").lower()
+        ]
+
+    total = len(entries)
+    page_limit = max(1, min(limit, 1000))
+    page_offset = max(0, offset)
+    page = entries[page_offset : page_offset + page_limit]
+    has_more = page_offset + page_limit < total
+
+    return page, total, has_more
+
+
+@app.get("/api/datasets/{dataset_id}/entries")
+async def get_dataset_entries(
+    dataset_id: str,
+    offset: int = 0,
+    limit: int = 200,
+    component: str | None = None,
+    level: str | None = None,
+    search: str | None = None,
+):
+    """
+    分页获取数据集的日志条目（支持筛选）。
+
+    前端 LogTable 按需加载：首屏取前 limit 条，滚动到底加载下一批。
+    """
+    dataset_path = os.path.join(DATASETS_DIR, f"{dataset_id}.json")
+    if not os.path.exists(dataset_path):
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    page, total, has_more = await asyncio.to_thread(
+        _load_filter_page,
+        dataset_path,
+        offset,
+        limit,
+        component,
+        level,
+        search,
+    )
+    page_limit = max(1, min(limit, 1000))
+
+    return {
+        "items": page,
+        "total": total,
+        "offset": max(0, offset),
+        "limit": page_limit,
+        "hasMore": has_more,
     }
 
 

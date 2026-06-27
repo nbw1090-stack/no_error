@@ -10,6 +10,7 @@
   border-radius: 16px;
   border: 1px solid var(--border-subtle);
   margin-bottom: 24px;
+  animation: fadeInUp 0.35s ease-out 0.1s both;
 }
 
 /* 下拉选择器 */
@@ -50,13 +51,21 @@
   cursor: pointer;
   font-size: 12px;
   font-family: var(--font-body);
-  transition: all 0.2s;
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+  transition: all 0.15s cubic-bezier(0.34, 1.56, 0.64, 1);
   white-space: nowrap;
 }
 
 .level-btn:hover {
   border-color: var(--text-secondary);
   color: var(--text-primary);
+  transform: translate3d(0, -1px, 0);
+}
+
+.level-btn:active {
+  animation: btnPress 0.2s ease-out;
 }
 
 .level-btn.active {

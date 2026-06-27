@@ -15,7 +15,7 @@
  */
 
 import { useState, useRef, useEffect, type KeyboardEvent, type FormEvent } from 'react';
-import { sendChatMessage } from '../api/client';
+import { sendChatMessageStream } from '../api/client';
 import type { ChatMessage, SessionMessage } from '../types/log';
 import './ChatPanel.css';
 
@@ -80,10 +80,13 @@ export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps
   const [input, setInput] = useState('');
   const [isThinking, setIsThinking] = useState(false);
   const [isRestoring, setIsRestoring] = useState(true);
+  const [toolProgress, setToolProgress] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const streamingMsgIdRef = useRef<string | null>(null);
+  const hasStreamingContentRef = useRef(false);
 
   /** 自动滚动到底部 */
   function scrollToBottom() {
@@ -114,7 +117,7 @@ export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps
     setIsRestoring(false);
   }, [sessionId, initialMessages]);
 
-  /** 发送消息（内部实现） */
+  /** 发送消息（内部实现，使用 SSE 流式） */
   async function _sendMessage(text: string) {
     if (isThinking) return;
 
@@ -133,43 +136,86 @@ export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps
     setInput('');
     setIsThinking(true);
 
+    // 2. 创建占位助手消息（流式内容将逐步填充）
+    const placeholderId = genId();
+    streamingMsgIdRef.current = placeholderId;
+    const placeholderMsg: ChatMessage = {
+      id: placeholderId,
+      role: 'assistant',
+      content: '',
+      timestamp: formatTime(),
+    };
+    setMessages((prev) => [...prev, placeholderMsg]);
+
     try {
-      const res = await sendChatMessage(
+      // 3. 流式消费 SSE 事件
+      for await (const event of sendChatMessageStream(
         { message: text, session_id: sessionId },
         controller.signal,
-      );
+      )) {
+        switch (event.type) {
+          case 'tool_progress':
+            if (event.status === 'start') {
+              setToolProgress(`正在调用: ${event.tool}...`);
+            } else {
+              setToolProgress(null);
+            }
+            break;
 
-      // 2. 追加助手回复
-      const assistantMsg: ChatMessage = {
-        id: genId(),
-        role: 'assistant',
-        content: res.reply,
-        timestamp: formatTime(),
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
+          case 'delta':
+            // 逐步追加文本到占位消息
+            if (event.text) {
+              hasStreamingContentRef.current = true;
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === placeholderId
+                    ? { ...msg, content: msg.content + event.text }
+                    : msg,
+                ),
+              );
+            }
+            break;
+
+          case 'done':
+            // 流正常结束
+            break;
+
+          case 'status':
+            // 状态消息可用于未来扩展
+            break;
+        }
+      }
     } catch (err: unknown) {
       // 用户主动取消
       if (err instanceof DOMException && err.name === 'AbortError') {
-        const stoppedMsg: ChatMessage = {
-          id: genId(),
-          role: 'assistant',
-          content: '⏹ 已停止生成。',
-          timestamp: formatTime(),
-        };
-        setMessages((prev) => [...prev, stoppedMsg]);
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === placeholderId
+              ? { ...msg, content: msg.content || '⏹ 已停止生成。' }
+              : msg,
+          ),
+        );
       } else {
         // 网络/服务端错误
-        const errorMsg: ChatMessage = {
-          id: genId(),
-          role: 'assistant',
-          content: '⚠️ 请求失败，请检查后端服务是否正常运行，以及 LLM API Key 是否已配置。',
-          timestamp: formatTime(),
-        };
-        setMessages((prev) => [...prev, errorMsg]);
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === placeholderId
+              ? {
+                  ...msg,
+                  content:
+                    msg.content ||
+                    '⚠️ 请求失败，请检查后端服务是否正常运行，以及 LLM API Key 是否已配置。',
+                }
+              : msg,
+          ),
+        );
       }
     } finally {
       setIsThinking(false);
+      setToolProgress(null);
       abortControllerRef.current = null;
+      streamingMsgIdRef.current = null;
+      hasStreamingContentRef.current = false;
       inputRef.current?.focus();
     }
   }
@@ -249,15 +295,17 @@ export default function ChatPanel({ sessionId, initialMessages }: ChatPanelProps
             </div>
           ))}
 
-          {/* 思考中... */}
-          {isThinking && (
+          {/* 思考中 / 工具调用进度（流式内容到达后自动隐藏） */}
+          {isThinking && !hasStreamingContentRef.current && (
             <div className="chat-thinking">
               <div className="thinking-dots">
                 <span className="thinking-dot" />
                 <span className="thinking-dot" />
                 <span className="thinking-dot" />
               </div>
-              <span className="thinking-text">分析中...</span>
+              <span className="thinking-text">
+                {toolProgress || '分析中...'}
+              </span>
             </div>
           )}
 

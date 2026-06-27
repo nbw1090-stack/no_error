@@ -57,6 +57,9 @@ def parse_logs(app_content: str, framework_content: str) -> dict:
     launch_count = 0
     unknown_count = 0
 
+    # 按组件累计错误数（供前端 StatsPanel 直接展示，无需全量聚合 entries）
+    component_error_counts: dict[str, int] = {}
+
     entry_id = 1  # 递增 ID，从 1 开始
 
     # 依次解析两个日志文件
@@ -99,6 +102,11 @@ def parse_logs(app_content: str, framework_content: str) -> dict:
                 # 统计计数
                 if level == "ERROR":
                     error_count += 1
+                    comp = entry["component"]
+                    if comp:
+                        component_error_counts[comp] = (
+                            component_error_counts.get(comp, 0) + 1
+                        )
                 elif level == "WARNING":
                     warning_count += 1
                 elif level == "NOTICE":
@@ -153,6 +161,12 @@ def parse_logs(app_content: str, framework_content: str) -> dict:
         "launchCount": launch_count,
         "unknownCount": unknown_count,
         "components": sorted(components),
+        "componentErrors": [
+            {"name": name, "count": count}
+            for name, count in sorted(
+                component_error_counts.items(), key=lambda x: x[1], reverse=True
+            )[:20]
+        ],
         "timeRange": {
             "start": min(timestamps) if timestamps else None,
             "end": max(timestamps) if timestamps else None,

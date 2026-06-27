@@ -1,39 +1,30 @@
 /**
  * StatsPanel 组件 —— 组件错误分布面板
  * 纯 CSS 水平条形图展示 Top 15 组件的错误数量
+ *
+ * 数据直接取自 summary.componentErrors（后端解析时已聚合），
+ * 不再依赖前端全量 entries。
  */
 
 import { useMemo } from 'react';
-import type { LogEntry } from '../types/log';
+import type { ParseSummary } from '../types/log';
 import './StatsPanel.css';
 
 interface StatsPanelProps {
-  entries: LogEntry[];
+  summary: ParseSummary;
 }
 
-export default function StatsPanel({ entries }: StatsPanelProps) {
-  /** 统计每个组件的 ERROR 数量，取 Top 15 */
+export default function StatsPanel({ summary }: StatsPanelProps) {
+  /** 取 Top 15 组件错误分布（后端已排序，前端只截断 + 算百分比） */
   const componentErrors = useMemo(() => {
-    const errorMap = new Map<string, number>();
-
-    for (const entry of entries) {
-      if (entry.level === 'ERROR' && entry.component) {
-        errorMap.set(entry.component, (errorMap.get(entry.component) || 0) + 1);
-      }
-    }
-
-    const sorted = Array.from(errorMap.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 15);
-
-    const maxCount = sorted.length > 0 ? sorted[0][1] : 1;
-
-    return sorted.map(([name, count]) => ({
+    const items = summary.componentErrors ?? [];
+    const maxCount = items.length > 0 ? items[0].count : 1;
+    return items.slice(0, 15).map(({ name, count }) => ({
       name,
       count,
       percentage: (count / maxCount) * 100,
     }));
-  }, [entries]);
+  }, [summary]);
 
   if (componentErrors.length === 0) {
     return (

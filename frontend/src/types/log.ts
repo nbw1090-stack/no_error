@@ -23,10 +23,18 @@ export interface ParseSummary {
   launchCount: number;
   unknownCount: number;
   components: string[];
+  /** 按组件的错误数分布（Top20，供 StatsPanel 直接展示，无需前端全量聚合） */
+  componentErrors: ComponentErrorStat[];
   timeRange: {
     start: string | null;
     end: string | null;
   };
+}
+
+/** 组件错误统计项 */
+export interface ComponentErrorStat {
+  name: string;
+  count: number;
 }
 
 /** 解析接口返回的完整结果 */
@@ -93,4 +101,33 @@ export interface SessionMessage {
     function: { name: string; arguments: string };
   }>;
   tool_call_id?: string;
+}
+
+/** SSE 流式事件（聊天用） */
+export interface StreamEvent {
+  type: 'status' | 'tool_progress' | 'delta' | 'done';
+  text?: string;
+  tool?: string;
+  status?: string;
+}
+
+/**
+ * SSE 流式事件（上传解析用）。
+ *
+ * 独立于 StreamEvent —— 上传解析的事件结构与聊天完全不同，
+ * 合并会让两端的 switch 出现永不命中的分支。
+ */
+export type ParseStreamEvent =
+  | { type: 'progress'; stage: 'extracting' | 'parsing' }
+  | { type: 'summary'; dataset_id: string; summary: ParseSummary }
+  | { type: 'done'; dataset_id: string }
+  | { type: 'error'; message: string };
+
+/** 分页日志条目响应（/api/datasets/{id}/entries） */
+export interface PaginatedEntries {
+  items: LogEntry[];
+  total: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
 }

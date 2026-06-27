@@ -3,18 +3,20 @@ Tar.gz 解压器
 
 从 dump_info.tar.gz 中提取 app.log 和 framework.log 文件内容。
 仅匹配路径中包含 LogDump/app.log 和 LogDump/framework.log 的成员。
+
+直接从内存中的压缩包字节流解压，不落盘临时文件。
 """
 
+import io
 import tarfile
-import os
 
 
-def extract_logs(tar_path: str) -> tuple[str, str]:
+def extract_logs(content: bytes) -> tuple[str, str]:
     """
-    解压 tar.gz 文件，提取 app.log 和 framework.log 的内容。
+    从内存中的 tar.gz 字节流提取 app.log 和 framework.log 的内容。
 
     Args:
-        tar_path: tar.gz 文件的路径
+        content: tar.gz 文件的字节内容
 
     Returns:
         (app_log_content, framework_log_content) 两个字符串元组。
@@ -23,8 +25,8 @@ def extract_logs(tar_path: str) -> tuple[str, str]:
     app_content = ""
     framework_content = ""
 
-    # 使用 tarfile 打开 gzip 压缩的 tar 包
-    with tarfile.open(tar_path, "r:gz") as tar:
+    # 直接从内存字节流打开 gzip 压缩的 tar 包（不落盘）
+    with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tar:
         for member in tar.getmembers():
             # 仅处理普通文件，跳过目录
             if not member.isfile():
