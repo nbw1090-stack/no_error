@@ -105,16 +105,11 @@ class OpenAIAdapter(BaseLLMAdapter):
                     for tc in choice.message.tool_calls
                 ]
 
-            # 构建 usage_details（v4 SDK 格式）
-            usage_details = None
-            if response.usage:
-                usage_details = {
-                    "input": response.usage.prompt_tokens or 0,
-                    "output": response.usage.completion_tokens or 0,
-                    "total": response.usage.total_tokens or 0,
-                }
+            # 构建 usage（含前缀缓存命中/未命中）
+            usage_details = _extract_usage(response.usage)
 
-            # 更新 generation 的输出
+            # 更新 generation 的输出。Langfuse usage_details 只放 input/output/total
+            # （避免把缓存字段计入成本）；缓存命中指标放 metadata，便于直接查看命中率。
             generation.update(
                 output={
                     "content": choice.message.content,
@@ -126,10 +121,11 @@ class OpenAIAdapter(BaseLLMAdapter):
                         for tc in (tool_calls or [])
                     ],
                 },
-                usage_details=usage_details,
+                usage_details=_langfuse_usage(usage_details),
                 metadata={
                     "finish_reason": choice.finish_reason,
                     "duration_ms": round(duration_ms, 2),
+                    **_cache_metadata(usage_details),
                 },
             )
 
@@ -204,11 +200,7 @@ class OpenAIAdapter(BaseLLMAdapter):
                     # 而 DeepSeek 等把 usage 放在携带 finish_reason 的末 chunk（choices 非空）。
                     # 因此对每个 chunk 都检查 usage，避免漏掉。
                     if chunk.usage:
-                        usage_details = {
-                            "input": chunk.usage.prompt_tokens or 0,
-                            "output": chunk.usage.completion_tokens or 0,
-                            "total": chunk.usage.total_tokens or 0,
-                        }
+                        usage_details = _extract_usage(chunk.usage)
 
                     # 空-choices chunk（OpenAI 风格的纯 usage chunk）：已取 usage，跳过后续
                     if not chunk.choices:
@@ -268,10 +260,11 @@ class OpenAIAdapter(BaseLLMAdapter):
                         for tc in (tool_calls or [])
                     ],
                 },
-                usage_details=usage_details,
+                usage_details=_langfuse_usage(usage_details),
                 metadata={
                     "finish_reason": finish_reason,
                     "duration_ms": round(duration_ms, 2),
+                    **_cache_metadata(usage_details),
                 },
             )
 
@@ -282,6 +275,72 @@ class OpenAIAdapter(BaseLLMAdapter):
                 "tool_calls": tool_calls,
                 "usage": usage_details,
             }
+
+
+def _extract_usage(usage) -> dict | None:
+    """
+    把供应商 usage 对象规约成内部 dict：input/output/total + cache_hit/cache_miss。
+
+    前缀缓存命中字段各家不同，这里兼容两种主流形态：
+    - DeepSeek：usage.prompt_cache_hit_tokens / prompt_cache_miss_tokens
+      （二者之和即 prompt_tokens）。
+    - OpenAI：usage.prompt_tokens_details.cached_tokens（命中），未命中 = 输入 - 命中。
+    取不到缓存字段时 cache_hit=0、cache_miss=input（视作全部未命中），不影响 input/total。
+    """
+    if not usage:
+        return None
+    input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+    output_tokens = getattr(usage, "completion_tokens", 0) or 0
+    total_tokens = getattr(usage, "total_tokens", 0) or 0
+
+    # DeepSeek 直接给出命中/未命中
+    cache_hit = getattr(usage, "prompt_cache_hit_tokens", None)
+    cache_miss = getattr(usage, "prompt_cache_miss_tokens", None)
+
+    if cache_hit is None:
+        # OpenAI 风格：prompt_tokens_details.cached_tokens
+        details = getattr(usage, "prompt_tokens_details", None)
+        cached = getattr(details, "cached_tokens", None) if details else None
+        cache_hit = cached or 0
+        cache_miss = max(0, input_tokens - cache_hit)
+    else:
+        cache_hit = cache_hit or 0
+        cache_miss = cache_miss if cache_miss is not None else max(
+            0, input_tokens - cache_hit
+        )
+
+    return {
+        "input": input_tokens,
+        "output": output_tokens,
+        "total": total_tokens,
+        "cache_hit": cache_hit,
+        "cache_miss": cache_miss,
+    }
+
+
+def _langfuse_usage(usage_details: dict | None) -> dict | None:
+    """只保留 input/output/total 给 Langfuse 计费，剔除缓存附加字段。"""
+    if not usage_details:
+        return None
+    return {
+        "input": usage_details.get("input", 0),
+        "output": usage_details.get("output", 0),
+        "total": usage_details.get("total", 0),
+    }
+
+
+def _cache_metadata(usage_details: dict | None) -> dict:
+    """从 usage_details 提炼缓存命中指标（含命中率），供 Langfuse generation 展示。"""
+    if not usage_details:
+        return {}
+    hit = usage_details.get("cache_hit", 0) or 0
+    miss = usage_details.get("cache_miss", 0) or 0
+    denom = hit + miss
+    return {
+        "cache_hit_tokens": hit,
+        "cache_miss_tokens": miss,
+        "cache_hit_rate": round(hit / denom, 4) if denom else 0.0,
+    }
 
 
 def _safe_serialize_messages(messages: list[dict]) -> list[dict]:

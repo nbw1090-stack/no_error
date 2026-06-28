@@ -62,3 +62,51 @@ async def test_execute_success_returns_json(sample_dataset):
     data = json.loads(result)
     assert data["total_lines"] == 6
     assert data["errors"] == 2
+
+
+async def test_execute_drops_unknown_kwargs(sample_dataset, monkeypatch):
+    # LLM 臆造未知参数（如把 max_lines 写成 lines）不应触发 TypeError，
+    # 而是被过滤掉、工具照常执行。
+    seen = {}
+
+    async def tool(dataset, real_param: int = 7):
+        seen["real_param"] = real_param
+        return {"ok": True}
+
+    monkeypatch.setitem(
+        ToolRegistry._tools,
+        "_test_filter",
+        ToolDefinition(
+            name="_test_filter", description="x", parameters={}, func=tool,
+            required=[],
+        ),
+    )
+    result = await ToolRegistry.execute(
+        "_test_filter",
+        {"real_param": 5, "hallucinated": "drop me"},
+        sample_dataset,
+    )
+    assert json.loads(result) == {"ok": True}
+    assert seen["real_param"] == 5  # 已知参数保留，未知参数被丢弃
+
+
+async def test_execute_var_keyword_tool_keeps_all_kwargs(sample_dataset, monkeypatch):
+    # 工具声明了 **kwargs → 任意参数原样放行，不丢弃
+    seen = {}
+
+    async def tool(dataset, **kwargs):
+        seen.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setitem(
+        ToolRegistry._tools,
+        "_test_varkw",
+        ToolDefinition(
+            name="_test_varkw", description="x", parameters={}, func=tool,
+            required=[],
+        ),
+    )
+    await ToolRegistry.execute(
+        "_test_varkw", {"anything": 1, "else_": 2}, sample_dataset
+    )
+    assert seen == {"anything": 1, "else_": 2}

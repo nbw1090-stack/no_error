@@ -534,6 +534,11 @@ def _not_found_payload(
     }
 
 
+# 单个函数体切片最多渲染的行数：超长函数（数百行）若整体塞入会被 ReAct 反复重发，
+# 这里截断中段、保留首尾，既给出函数轮廓又挡住 token 膨胀（需细看可用 offset 翻页读）。
+_MAX_SLICE_LINES = 160
+
+
 def _read_source_slice(
     user_id: int,
     component: str,
@@ -544,6 +549,8 @@ def _read_source_slice(
 ) -> tuple[str, int, int]:
     """
     从源码快照读出函数体（含上下文），带行号渲染。
+
+    超长函数体（> _MAX_SLICE_LINES）会保留首尾、折叠中段，避免单条结果过大。
 
     Returns:
         (渲染后的源码, 实际起始行, 实际结束行)。文件读不到时源码为空串。
@@ -562,10 +569,21 @@ def _read_source_slice(
     hi = min(len(lines), end_line + ctx)
     slice_lines = lines[lo:hi]
 
-    # 带行号渲染，便于 agent 精确引用行号
-    rendered = "\n".join(
-        f"{(lo + i + 1):>5} | {s}" for i, s in enumerate(slice_lines)
-    )
+    def _render(seg: list[str], base: int) -> list[str]:
+        return [f"{(base + i + 1):>5} | {s}" for i, s in enumerate(seg)]
+
+    # 超长则折叠中段，保留首尾各半，给出函数轮廓而非全文
+    if len(slice_lines) > _MAX_SLICE_LINES:
+        head = _MAX_SLICE_LINES // 2
+        tail = _MAX_SLICE_LINES - head
+        omitted = len(slice_lines) - head - tail
+        rendered = "\n".join(
+            _render(slice_lines[:head], lo)
+            + [f"      | … 省略中段 {omitted} 行（如需细看用 get_file_source 翻页）…"]
+            + _render(slice_lines[-tail:], lo + len(slice_lines) - tail)
+        )
+    else:
+        rendered = "\n".join(_render(slice_lines, lo))
     return (rendered, lo + 1, lo + len(slice_lines))
 
 

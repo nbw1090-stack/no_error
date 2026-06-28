@@ -180,8 +180,11 @@ LLM_TEMPERATURE=0.3
 LLM_MAX_TOKENS=4096
 
 # ---- Agent 循环 ----
-AGENT_MAX_ITERATIONS=10      # ReAct 最大迭代轮数
-AGENT_MAX_HISTORY=40         # 保留的对话历史消息条数
+AGENT_MAX_ITERATIONS=10        # ReAct 最大迭代轮数
+AGENT_MAX_HISTORY=40           # 保留的对话历史消息条数（防御性上限）
+AGENT_CONTEXT_TOKEN_BUDGET=24000  # 历史 token 软预算：超过后省略最旧工具结果
+                                  # （压制 ReAct 重发历史的二次方膨胀；0=禁用）
+AGENT_RECENT_TOOLS_KEEP=3      # 省略时保留多少条最近工具结果不动
 
 # ---- Langfuse 可观测性（可选）----
 LANGFUSE_ENABLED=false

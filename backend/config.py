@@ -160,6 +160,12 @@ class AppConfig:
     )
     max_tool_iterations: int = 10
     max_history_messages: int = 40
+    # 历史 token 软预算：发给 LLM 的历史(不含 system/tool schema)估算超过此值时，
+    # 才开始省略最旧的工具结果（保留最近 N 条完整）。设为 0 禁用按 token 省略。
+    # 默认 24000 ≈ 给 system+工具 schema+回复留足空间，又能挡住二次方膨胀。
+    context_token_budget: int = 24000
+    # 省略时保留多少条**最近**的工具结果不动（保证当前推理链有完整证据）。
+    recent_tools_keep: int = 3
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -168,4 +174,8 @@ class AppConfig:
             langfuse=LangfuseConfig.from_env(),
             max_tool_iterations=int(os.getenv("AGENT_MAX_ITERATIONS", "10")),
             max_history_messages=int(os.getenv("AGENT_MAX_HISTORY", "40")),
+            context_token_budget=int(
+                os.getenv("AGENT_CONTEXT_TOKEN_BUDGET", "24000")
+            ),
+            recent_tools_keep=int(os.getenv("AGENT_RECENT_TOOLS_KEEP", "3")),
         )

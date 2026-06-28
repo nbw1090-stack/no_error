@@ -383,6 +383,11 @@
   flex-shrink: 0;
 }
 
+.chat-usage-cache {
+  color: var(--accent, #4caf50);
+  opacity: 0.9;
+}
+
 /* ---- 点赞 / 踩反馈按钮（仅 assistant 消息）---- */
 .message-feedback {
   display: flex;

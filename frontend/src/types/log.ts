@@ -79,6 +79,10 @@ export interface ChatResponse {
     input: number;
     output: number;
     total: number;
+    /** 前缀缓存命中/未命中 token 与命中率（DeepSeek 等供应商上报） */
+    cache_hit?: number;
+    cache_miss?: number;
+    cache_hit_rate?: number;
   };
 }
 
@@ -127,6 +131,9 @@ export interface StreamEvent {
   input?: number;
   output?: number;
   total?: number;
+  /** type === 'usage' 时携带：前缀缓存命中/未命中 token（DeepSeek 等供应商上报） */
+  cache_hit?: number;
+  cache_miss?: number;
 }
 
 /**

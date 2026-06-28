@@ -142,6 +142,87 @@ async def test_chat_no_usage_does_not_crash():
     assert result["content"] == "hi"  # usage=None 不应抛异常
 
 
+# ============================================================
+# 前缀缓存命中/未命中提取（_extract_usage / _cache_metadata）
+# ============================================================
+
+def test_extract_usage_deepseek_cache_fields():
+    from agent.llm.openai_adapter import _extract_usage
+
+    usage = SimpleNamespace(
+        prompt_tokens=1000,
+        completion_tokens=50,
+        total_tokens=1050,
+        prompt_cache_hit_tokens=800,
+        prompt_cache_miss_tokens=200,
+    )
+    out = _extract_usage(usage)
+    assert out == {
+        "input": 1000,
+        "output": 50,
+        "total": 1050,
+        "cache_hit": 800,
+        "cache_miss": 200,
+    }
+
+
+def test_extract_usage_openai_cached_tokens():
+    from agent.llm.openai_adapter import _extract_usage
+
+    usage = SimpleNamespace(
+        prompt_tokens=1000,
+        completion_tokens=50,
+        total_tokens=1050,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=300),
+    )
+    out = _extract_usage(usage)
+    assert out["cache_hit"] == 300
+    assert out["cache_miss"] == 700  # input - hit
+
+
+def test_extract_usage_no_cache_fields_treats_all_as_miss():
+    from agent.llm.openai_adapter import _extract_usage
+
+    out = _extract_usage(_usage(p=100, c=10, t=110))
+    assert out["cache_hit"] == 0
+    assert out["cache_miss"] == 100
+
+
+def test_extract_usage_none_returns_none():
+    from agent.llm.openai_adapter import _extract_usage
+
+    assert _extract_usage(None) is None
+
+
+def test_cache_metadata_computes_hit_rate():
+    from agent.llm.openai_adapter import _cache_metadata
+
+    md = _cache_metadata({"cache_hit": 750, "cache_miss": 250})
+    assert md["cache_hit_tokens"] == 750
+    assert md["cache_miss_tokens"] == 250
+    assert md["cache_hit_rate"] == 0.75
+
+
+def test_langfuse_usage_strips_cache_keys():
+    from agent.llm.openai_adapter import _langfuse_usage
+
+    out = _langfuse_usage(
+        {"input": 10, "output": 2, "total": 12, "cache_hit": 8, "cache_miss": 2}
+    )
+    assert out == {"input": 10, "output": 2, "total": 12}
+
+
+async def test_chat_surfaces_cache_in_usage():
+    usage = SimpleNamespace(
+        prompt_tokens=500, completion_tokens=20, total_tokens=520,
+        prompt_cache_hit_tokens=400, prompt_cache_miss_tokens=100,
+    )
+    adapter, _ = _make_adapter(_resp(content="hi", usage=usage))
+    result = await adapter.chat(MESSAGES)
+    assert result["usage"]["cache_hit"] == 400
+    assert result["usage"]["cache_miss"] == 100
+
+
 async def test_chat_api_error_propagates():
     adapter, create_mock = _make_adapter(None)
     create_mock.side_effect = RuntimeError("boom")

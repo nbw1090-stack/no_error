@@ -28,7 +28,11 @@ logger = logging.getLogger(__name__)
 
 def _accumulate_usage(totals: dict, usage: dict | None) -> None:
     """
-    把单次 LLM 调用的 usage 累加进 totals（键：input / output / total）。
+    把单次 LLM 调用的 usage 累加进 totals。
+
+    键：input / output / total，外加 DeepSeek 等供应商上报的前缀缓存命中/未命中
+    （cache_hit / cache_miss，二者之和应等于 input）。缓存命中部分计费通常为
+    未命中的 1/10~1/50，是衡量「ReAct 重发历史是否被缓存吃下」的关键指标。
 
     usage 为 None 或缺键时按 0 处理，保证适配器/测试桩未带 usage 时不报错。
     """
@@ -37,6 +41,8 @@ def _accumulate_usage(totals: dict, usage: dict | None) -> None:
     totals["input"] += usage.get("input", 0) or 0
     totals["output"] += usage.get("output", 0) or 0
     totals["total"] += usage.get("total", 0) or 0
+    totals["cache_hit"] += usage.get("cache_hit", 0) or 0
+    totals["cache_miss"] += usage.get("cache_miss", 0) or 0
 
 
 # 最后一轮的收尾指令：该轮禁用工具，逼模型用已有信息直接作答，
@@ -207,11 +213,24 @@ class Agent:
         session_manager: SessionManager,
         max_iterations: int = 10,
         max_history: int = 40,
+        context_token_budget: int = 24000,
+        recent_tools_keep: int = 3,
     ):
         self.llm = llm
         self.session_manager = session_manager
         self.max_iterations = max_iterations
         self.max_history = max_history
+        self.context_token_budget = context_token_budget
+        self.recent_tools_keep = recent_tools_keep
+
+    def _make_context(self, system_prompt: str) -> ConversationContext:
+        """构造对话上下文（统一注入 token 预算 / 工具结果省略策略）。"""
+        return ConversationContext(
+            system_prompt=system_prompt,
+            max_history=self.max_history,
+            token_budget=self.context_token_budget,
+            recent_tools_keep=self.recent_tools_keep,
+        )
 
     async def run(
         self,
@@ -254,9 +273,7 @@ class Agent:
         system_prompt = _resolve_system_prompt(
             dataset.summary if dataset is not None else None, source_components
         )
-        ctx = ConversationContext(
-            system_prompt=system_prompt, max_history=self.max_history
-        )
+        ctx = self._make_context(system_prompt)
 
         # ---- 3. 将用户消息加入会话 ----
         self.session_manager.add_message(
@@ -288,7 +305,14 @@ class Agent:
 
         # ---- 5. ReAct 循环 ----
         final_reply = ""
-        totals = {"input": 0, "output": 0, "total": 0}  # 整轮 token 累计
+        # 整轮 token 累计（含前缀缓存命中/未命中，便于估算真实计费）
+        totals = {
+            "input": 0,
+            "output": 0,
+            "total": 0,
+            "cache_hit": 0,
+            "cache_miss": 0,
+        }
         # 同一 (工具,参数) 无效调用计数，用于检测对工具的死循环调用
         unproductive_calls: dict[str, int] = {}
 
@@ -300,14 +324,11 @@ class Agent:
             # 最后一轮：禁用工具 + 注入收尾指令，强制 LLM 用已有信息直接作答
             is_last = iteration == self.max_iterations - 1
 
-            if iteration == 0:
-                messages = ctx.build_messages(
-                    history=session.messages[:-1],
-                    user_message=user_message,
-                )
-            else:
-                messages = [{"role": "system", "content": system_prompt}]
-                messages.extend(session.messages)
+            # 统一通过上下文构建器组装消息：system + 历史，并在超 token 预算时
+            # 省略陈旧工具结果（压制 ReAct 重发历史的二次方膨胀）。iteration 0 时
+            # session.messages 末尾即刚加入的用户消息，与旧的 [:-1]+user_message
+            # 等价，故两轮统一处理——关键是迭代 ≥1 也走省略，而非重发全量。
+            messages = ctx.build_messages(history=session.messages)
             if is_last and exposed_groups:
                 messages.append(
                     {"role": "system", "content": _FINAL_STEP_DIRECTIVE}
@@ -426,11 +447,14 @@ class Agent:
         if usage is not None:
             usage.update(totals)
         logger.info(
-            "Agent done: session=%s input_tokens=%d output_tokens=%d total_tokens=%d",
+            "Agent done: session=%s input_tokens=%d output_tokens=%d "
+            "total_tokens=%d cache_hit=%d cache_miss=%d",
             session_id,
             totals["input"],
             totals["output"],
             totals["total"],
+            totals["cache_hit"],
+            totals["cache_miss"],
         )
 
         return final_reply
@@ -468,9 +492,7 @@ class Agent:
         system_prompt = _resolve_system_prompt(
             dataset.summary if dataset is not None else None, source_components
         )
-        ctx = ConversationContext(
-            system_prompt=system_prompt, max_history=self.max_history
-        )
+        ctx = self._make_context(system_prompt)
 
         # ---- 3. 将用户消息加入会话 ----
         self.session_manager.add_message(
@@ -502,7 +524,14 @@ class Agent:
 
         # ---- 5. ReAct 循环 ----
         final_reply = ""
-        totals = {"input": 0, "output": 0, "total": 0}  # 整轮 token 累计
+        # 整轮 token 累计（含前缀缓存命中/未命中，便于估算真实计费）
+        totals = {
+            "input": 0,
+            "output": 0,
+            "total": 0,
+            "cache_hit": 0,
+            "cache_miss": 0,
+        }
         # 同一 (工具,参数) 无效调用计数，用于检测对工具的死循环调用
         unproductive_calls: dict[str, int] = {}
 
@@ -514,14 +543,11 @@ class Agent:
             # 最后一轮：禁用工具 + 注入收尾指令，强制 LLM 用已有信息直接作答
             is_last = iteration == self.max_iterations - 1
 
-            if iteration == 0:
-                messages = ctx.build_messages(
-                    history=session.messages[:-1],
-                    user_message=user_message,
-                )
-            else:
-                messages = [{"role": "system", "content": system_prompt}]
-                messages.extend(session.messages)
+            # 统一通过上下文构建器组装消息：system + 历史，并在超 token 预算时
+            # 省略陈旧工具结果（压制 ReAct 重发历史的二次方膨胀）。iteration 0 时
+            # session.messages 末尾即刚加入的用户消息，与旧的 [:-1]+user_message
+            # 等价，故两轮统一处理——关键是迭代 ≥1 也走省略，而非重发全量。
+            messages = ctx.build_messages(history=session.messages)
             if is_last and exposed_groups:
                 messages.append(
                     {"role": "system", "content": _FINAL_STEP_DIRECTIVE}
@@ -673,17 +699,22 @@ class Agent:
 
         # ---- 整轮 token 消耗：先回传 usage 事件，再结束流 ----
         logger.info(
-            "Agent done [stream]: session=%s input_tokens=%d output_tokens=%d total_tokens=%d",
+            "Agent done [stream]: session=%s input_tokens=%d output_tokens=%d "
+            "total_tokens=%d cache_hit=%d cache_miss=%d",
             session_id,
             totals["input"],
             totals["output"],
             totals["total"],
+            totals["cache_hit"],
+            totals["cache_miss"],
         )
         yield {
             "type": "usage",
             "input": totals["input"],
             "output": totals["output"],
             "total": totals["total"],
+            "cache_hit": totals["cache_hit"],
+            "cache_miss": totals["cache_miss"],
         }
 
         # ---- 流结束 ----

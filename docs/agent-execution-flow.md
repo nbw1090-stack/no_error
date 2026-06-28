@@ -138,8 +138,8 @@ tool_schemas = ToolRegistry.get_schemas(groups=exposed_groups) if exposed_groups
 
 ### 6.1 组装消息
 
-- **第 0 轮**：用 `ConversationContext.build_messages(history=session.messages[:-1], user_message=...)`，即「系统提示词 + 裁剪后的历史 + 当前用户消息」。历史超过 `max_history`（默认 40）时只保留最近 N 条，防超 token。
-- **第 ≥1 轮**：直接「系统提示词 + 完整 `session.messages`」（此时 messages 已包含上一轮的工具调用与工具结果）。
+- **每一轮统一**：`ConversationContext.build_messages(history=session.messages)`，即「系统提示词 + 历史」。第 0 轮 `session.messages` 末尾即刚加入的用户消息，故与旧的「`[:-1]` + user_message」等价；第 ≥1 轮 messages 已包含上一轮的工具调用与工具结果。
+- **两道裁剪**：① 条数防御性上限 `max_history`（默认 40）；② **token 软预算** `AGENT_CONTEXT_TOKEN_BUDGET`（默认 24000）——历史 token 估算超预算时，把「最近 `AGENT_RECENT_TOOLS_KEEP`（默认 3）条之外」的**工具结果**内容替换为短占位符（保留 `tool_call_id`，结构合法、原文仍在 session 存档可追溯）。这是压制 ReAct「每轮重发全量历史」二次方膨胀的关键；仅在超预算时触发，平时保持前缀字节稳定以吃满 DeepSeek 自动前缀缓存。
 
 ### 6.2 调用 LLM
 
@@ -211,12 +211,12 @@ tool_schemas = ToolRegistry.get_schemas(groups=exposed_groups) if exposed_groups
 **随迭代的演化**——上下文单调增长，每轮把上一轮的工具调用与结果并入历史：
 
 ```
-第 0 轮   messages = [system] + 裁剪历史(session.messages[:-1]) + [当前 user]
-          └ ConversationContext.build_messages(history=..., user_message=...)
-
-第 ≥1 轮  messages = [system] + 完整 session.messages
-          └ 历史已追加上一轮的 assistant(tool_calls) 与 tool(result)
+每一轮   messages = ConversationContext.build_messages(history=session.messages)
+          = [system] + 历史（条数裁剪 + 超 token 预算时省略最旧工具结果）
+          └ 第 0 轮 session.messages 末尾即当前 user（与旧 [:-1]+user_message 等价）
+          └ 第 ≥1 轮历史已追加上一轮的 assistant(tool_calls) 与 tool(result)
             ↑ 每执行一次工具就 add_message 落盘，下一轮 LLM 即可见
+            ↑ 超 AGENT_CONTEXT_TOKEN_BUDGET 时，最近 N 条之外的旧工具结果→占位符
             ↑ 直到某轮 LLM 不再返回 tool_calls → 收尾 break
 ```
 

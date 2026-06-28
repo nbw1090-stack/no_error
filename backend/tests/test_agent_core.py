@@ -357,7 +357,35 @@ async def test_run_aggregates_usage_across_iterations(tmp_path, sample_dataset, 
     )
     usage = {}
     await agent.run(session.session_id, "q", sample_dataset, usage=usage)
-    assert usage == {"input": 300, "output": 30, "total": 330}
+    assert usage == {
+        "input": 300,
+        "output": 30,
+        "total": 330,
+        "cache_hit": 0,
+        "cache_miss": 0,
+    }
+
+
+async def test_run_aggregates_cache_hit_miss(tmp_path, sample_dataset, tc):
+    """run() 累加各轮的 cache_hit / cache_miss（供前缀缓存命中率统计）。"""
+    sm = SessionManager(str(tmp_path / "sessions"))
+    session = sm.create("ds-test")
+    agent = Agent(
+        llm=FakeLLMAdapter(
+            [[tc("get_summary", {})], "done"],
+            usages=[
+                {"input": 100, "output": 10, "total": 110,
+                 "cache_hit": 0, "cache_miss": 100},
+                {"input": 200, "output": 20, "total": 220,
+                 "cache_hit": 180, "cache_miss": 20},
+            ],
+        ),
+        session_manager=sm,
+    )
+    usage = {}
+    await agent.run(session.session_id, "q", sample_dataset, usage=usage)
+    assert usage["cache_hit"] == 180
+    assert usage["cache_miss"] == 120
 
 
 async def test_run_usage_zero_when_adapter_silent(tmp_path, sample_dataset):
@@ -367,7 +395,13 @@ async def test_run_usage_zero_when_adapter_silent(tmp_path, sample_dataset):
     agent = Agent(llm=FakeLLMAdapter(["hi"]), session_manager=sm)
     usage = {}
     await agent.run(session.session_id, "q", sample_dataset, usage=usage)
-    assert usage == {"input": 0, "output": 0, "total": 0}
+    assert usage == {
+        "input": 0,
+        "output": 0,
+        "total": 0,
+        "cache_hit": 0,
+        "cache_miss": 0,
+    }
 
 
 async def test_run_stream_emits_usage_event_before_done(tmp_path, sample_dataset, tc):
@@ -394,6 +428,8 @@ async def test_run_stream_emits_usage_event_before_done(tmp_path, sample_dataset
         "input": 120,
         "output": 12,
         "total": 132,
+        "cache_hit": 0,
+        "cache_miss": 0,
     }
     # usage 事件必须紧贴在最后一个 done 之前
     assert events[-1]["type"] == "done"

@@ -5,6 +5,7 @@
 工具在导入时自动注册到类级别的 _tools 字典中。
 """
 
+import inspect
 import json
 import logging
 from typing import Callable
@@ -112,9 +113,51 @@ class ToolRegistry:
         if not tool:
             return json.dumps({"error": f"Unknown tool: {name}"})
 
+        # LLM 偶尔会臆造工具没有的参数（如把 max_lines 写成 lines），直接 **传入
+        # 会触发 TypeError 报错、白白浪费一轮 ReAct。这里按函数签名过滤掉未知参数，
+        # 容忍幻觉参数继续执行（被丢弃的参数记 warning，便于发现 prompt/schema 偏差）。
+        safe_args = cls._filter_kwargs(tool.func, arguments)
+
         try:
-            result = await tool.func(dataset, **arguments)
+            result = await tool.func(dataset, **safe_args)
             return json.dumps(result, ensure_ascii=False, default=str)
         except Exception as e:
             logger.exception("Tool execution failed: %s", name)
             return json.dumps({"error": str(e)})
+
+    @staticmethod
+    def _filter_kwargs(func: Callable, arguments: dict) -> dict:
+        """
+        按函数签名过滤参数，丢弃工具不接受的未知键（防 LLM 幻觉参数导致 TypeError）。
+
+        函数若声明了 **kwargs 则原样放行（不丢弃任何参数）。被丢弃的键记 warning。
+        """
+        if not isinstance(arguments, dict):
+            return {}
+        try:
+            sig = inspect.signature(func)
+        except (TypeError, ValueError):
+            return arguments
+        params = sig.parameters.values()
+        # 有 **kwargs：函数能消化任意键，原样放行
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
+            return arguments
+        accepted = {
+            p.name
+            for p in params
+            if p.kind
+            in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+            and p.name != "dataset"  # 首位 dataset 由执行器注入，非 LLM 参数
+        }
+        filtered = {k: v for k, v in arguments.items() if k in accepted}
+        dropped = set(arguments) - set(filtered)
+        if dropped:
+            logger.warning(
+                "Dropping unknown args for tool %s: %s",
+                getattr(func, "__name__", func),
+                sorted(dropped),
+            )
+        return filtered

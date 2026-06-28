@@ -108,6 +108,8 @@ export default function ChatPanel({
     input: number;
     output: number;
     total: number;
+    cacheHit: number;
+    cacheMiss: number;
   } | null>(null);
   /** 用户对每条 assistant 消息的反馈（msgId -> like/dislike），用于高亮选中态 */
   const [feedback, setFeedback] = useState<Record<string, 'like' | 'dislike'>>({});
@@ -311,6 +313,8 @@ export default function ChatPanel({
                 input: event.input,
                 output: event.output,
                 total: event.total,
+                cacheHit: event.cache_hit ?? 0,
+                cacheMiss: event.cache_miss ?? 0,
               });
             }
             break;
@@ -578,6 +582,18 @@ export default function ChatPanel({
         <div className="chat-usage">
           本次消耗 {lastUsage.total} tokens（输入 {lastUsage.input} / 输出{' '}
           {lastUsage.output}）
+          {lastUsage.cacheHit + lastUsage.cacheMiss > 0 && (
+            <span className="chat-usage-cache">
+              {' '}
+              · 缓存命中{' '}
+              {Math.round(
+                (lastUsage.cacheHit /
+                  (lastUsage.cacheHit + lastUsage.cacheMiss)) *
+                  100,
+              )}
+              %（{lastUsage.cacheHit} 命中 / {lastUsage.cacheMiss} 未命中）
+            </span>
+          )}
         </div>
       )}
     </div>

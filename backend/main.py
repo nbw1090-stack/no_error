@@ -92,6 +92,8 @@ agent = Agent(
     session_manager=session_manager,
     max_iterations=config.max_tool_iterations,
     max_history=config.max_history_messages,
+    context_token_budget=config.context_token_budget,
+    recent_tools_keep=config.recent_tools_keep,
 ) if llm else None
 
 # ============================================================
@@ -201,6 +203,38 @@ def atomic_write_json(path: str, data: dict) -> None:
 def sse(event: dict) -> str:
     """将事件 dict 序列化为 SSE data 行。"""
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+def _cache_hit_rate(usage: dict) -> float:
+    """前缀缓存命中率 = cache_hit / (cache_hit + cache_miss)，分母为 0 时返回 0。"""
+    hit = usage.get("cache_hit", 0) or 0
+    miss = usage.get("cache_miss", 0) or 0
+    denom = hit + miss
+    return round(hit / denom, 4) if denom else 0.0
+
+
+def _usage_trace_metadata(usage: dict) -> dict:
+    """整轮 token + 缓存命中指标，写入 Langfuse trace metadata（聚合视图可见）。"""
+    return {
+        "total_input_tokens": usage.get("input", 0),
+        "total_output_tokens": usage.get("output", 0),
+        "total_tokens": usage.get("total", 0),
+        "cache_hit_tokens": usage.get("cache_hit", 0),
+        "cache_miss_tokens": usage.get("cache_miss", 0),
+        "cache_hit_rate": _cache_hit_rate(usage),
+    }
+
+
+def _usage_api_payload(usage: dict) -> dict:
+    """整轮 token + 缓存命中指标，作为 /api/chat 响应里的 usage 字段返回前端。"""
+    return {
+        "input": usage.get("input", 0),
+        "output": usage.get("output", 0),
+        "total": usage.get("total", 0),
+        "cache_hit": usage.get("cache_hit", 0),
+        "cache_miss": usage.get("cache_miss", 0),
+        "cache_hit_rate": _cache_hit_rate(usage),
+    }
 
 
 def _load_dataset_owned(dataset_id: str, user_id: int) -> dict:
@@ -529,9 +563,7 @@ async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
                         output={"reply": reply[:2000]},
                         metadata={
                             **base_metadata,
-                            "total_input_tokens": usage.get("input", 0),
-                            "total_output_tokens": usage.get("output", 0),
-                            "total_tokens": usage.get("total", 0),
+                            **_usage_trace_metadata(usage),
                         },
                     )
                 except Exception as e:
@@ -548,11 +580,7 @@ async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
             return {
                 "reply": reply,
                 "trace_id": trace_id,
-                "usage": {
-                    "input": usage.get("input", 0),
-                    "output": usage.get("output", 0),
-                    "total": usage.get("total", 0),
-                },
+                "usage": _usage_api_payload(usage),
             }
         finally:
             # 确保 trace 数据立即发送到 Langfuse（异常路径同样上报）
@@ -694,9 +722,7 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(get_current_user)):
                         output={"status": "stream_complete"},
                         metadata={
                             **base_metadata,
-                            "total_input_tokens": usage_total.get("input", 0),
-                            "total_output_tokens": usage_total.get("output", 0),
-                            "total_tokens": usage_total.get("total", 0),
+                            **_usage_trace_metadata(usage_total),
                         },
                     )
             else:
