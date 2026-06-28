@@ -85,3 +85,18 @@ Optional Langfuse v4 tracing, auto-disabled when `LANGFUSE_ENABLED != true`. Use
 - **Persistence:** always use `atomic_write_json` (defined in `main.py`) for dataset/session writes. Blocking CPU/IO work (parsing, file reads in paginated endpoints) goes through `asyncio.to_thread` to avoid blocking the event loop.
 - **SSE streaming:** SSE event payloads are defined as discriminated unions in `types/log.ts` (`StreamEvent` for chat, `ParseStreamEvent` for upload) — keep these two **separate**; merging them creates unreachable `switch` branches on both sides.
 - **The parser must stay in sync** with `LogEntry`/`ParseSummary` in `frontend/src/types/log.ts` — entry fields (`id, timestamp, component, level, file, line, message, source`) and summary fields are the cross-stack contract.
+
+## Commit constraints (versioning + records)
+
+**Every commit MUST update both `VERSION` and `CHANGELOG.md`, together.** They are strictly bound:
+
+- **`VERSION`** holds a single `主.次.补` line. Each commit bumps the **last field by +1** (e.g. `0.0.0` → `0.0.1` → `0.0.2`). Do not skip or batch — one commit, one bump.
+- **`CHANGELOG.md`** gets a new section header matching the new `VERSION` exactly, with at least a one-line description of what changed. The version in the changelog header and the `VERSION` file must always be identical.
+- **`result/`** is the per-version effect archive (e.g. `result/v0.0.0.md`): when a change alters agent behavior or eval results, add/update a `result/v<version>.md` capturing the method + measured results, and commit it.
+
+**Records that must NOT be committed** (kept local / gitignored — only `result/`, `CHANGELOG.md`, `VERSION` are the committed records):
+- evaluation run artifacts — `backend/data/eval_runs/` (per-run scorecards/details, regenerated each run);
+- personal notes / drafts — `DEV_NOTES.md`, `docs/claude-code-agent-loop.md`;
+- all runtime data under `backend/data/` (datasets, sessions, `*.db`, source snapshots) — already gitignored.
+
+When committing, `git add` the intended source/record files explicitly; never `git add -A` blindly, or the gitignored records' siblings may sneak in.

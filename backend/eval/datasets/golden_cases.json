@@ -1,0 +1,210 @@
+[
+  {
+    "input": {
+      "question": "pcie_device 一直在报 \"PCIe card oob management init failed\"，几乎每分钟一次，帮我定位代码根因和修复方向。",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": ["pcie_oob_mgmt_init", "CAPABILITY", "comm.get_info", "oob"],
+      "expected_component": "pcie_device",
+      "expected_citations": ["pcie_card.lua:49"],
+      "expected_tools": ["gather_code_context"],
+      "must_use_source": true,
+      "reference_answer": "pcie_card.lua:49 的 pcie_oob_mgmt_update_info 调用 pcie_oob_mgmt_init，后者用 comm.get_info(chip_info, e_opcode.CAPABILITY) 与带外管理芯片通信；芯片不可达/不响应/协议不支持时返回 false，于是记 error 并周期性重试。修复方向：在 init 前校验芯片在位与 SMBus 通路、对 get_info 失败细分错误码、加退避重试而非每分钟死重试。"
+    },
+    "metadata": {"category": "hardware-init", "difficulty": "medium", "expected_max_iterations": 4}
+  },
+  {
+    "input": {
+      "question": "网卡 network_adapter 报错 ncsi_package.lua(134)，这是什么问题？该怎么排查？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": ["ncsi_select_package", "ncsi_cmd_ctrl", "NCSI_SUCCESS"],
+      "expected_component": "network_adapter",
+      "expected_citations": ["ncsi_package.lua:134"],
+      "expected_tools": ["gather_code_context"],
+      "must_use_source": true,
+      "reference_answer": "ncsi_package.lua:134 的 ncsi_select_package 中 ncsi_utils.ncsi_cmd_ctrl() 返回非 NCSI_SUCCESS，select package 命令失败（报文构造/校验/网络传输/设备响应任一环出错）。排查：确认网口在位与链路、抓 ncsi_cmd_ctrl 实际返回码、校验报文结构。"
+    },
+    "metadata": {"category": "network-ncsi", "difficulty": "medium", "expected_max_iterations": 4}
+  },
+  {
+    "input": {
+      "question": "ncsi_channel.lua:172 报错怎么排查？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": ["ncsi_cmd_ctrl", "channel", "ncsi"],
+      "expected_component": "network_adapter",
+      "expected_citations": ["ncsi_channel.lua:172"],
+      "expected_tools": ["gather_code_context"],
+      "must_use_source": true,
+      "reference_answer": "ncsi_channel.lua:172 的 handle_channel_operation 在 enable/disable channel 时 ncsi_cmd_ctrl() 失败（设备无响应或 channel_id 非法）。排查：校验 channel_id 范围、检查设备状态、记录具体返回码。"
+    },
+    "metadata": {"category": "network-ncsi", "difficulty": "medium", "expected_max_iterations": 4}
+  },
+  {
+    "input": {
+      "question": "pcie_device 的 topo_reader.lua(159) 报错根因是什么？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": ["read_topo_info", "PluginRequest", "topo"],
+      "expected_component": "pcie_device",
+      "expected_citations": ["topo_reader.lua:159"],
+      "expected_tools": ["gather_code_context"],
+      "must_use_source": true,
+      "reference_answer": "topo_reader.lua:159 的 read_topo_info 调 chip:PluginRequest() 读拓扑信息返回 nil/错误，多因 SMC 芯片不可用、插件未加载或 zone_support 配置非法。修复：请求前校验芯片状态与插件注册，必要时回退缓存拓扑。"
+    },
+    "metadata": {"category": "topology", "difficulty": "hard", "expected_max_iterations": 5}
+  },
+  {
+    "input": {
+      "question": "biz_topo.lua:337 的 get_port_id 为什么会失败？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": ["get_port_id", "WorkMode", "SerDes", "ModeConfig"],
+      "expected_component": "pcie_device",
+      "expected_citations": ["biz_topo.lua:337"],
+      "expected_tools": ["gather_code_context"],
+      "must_use_source": true,
+      "reference_answer": "biz_topo.lua:337 的 get_port_id 在 mode_config.Device[] 里按 SerDes WorkMode（PCIE=1/SATA=3/SAS=4）找匹配项失败——配置里的 WorkMode 与 ModeConfigs 不一致。修复：启动时校验 ModeConfigs、加默认/兜底 mode、日志打印期望与可用 mode。"
+    },
+    "metadata": {"category": "topology", "difficulty": "hard", "expected_max_iterations": 5}
+  },
+  {
+    "input": {
+      "question": "biz_topo.lua:855 提示找不到设备，根因在哪？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": ["get_device", "get_port_id", "SerDes"],
+      "expected_component": "pcie_device",
+      "expected_citations": ["biz_topo.lua:855"],
+      "expected_tools": ["gather_code_context"],
+      "must_use_source": true,
+      "reference_answer": "biz_topo.lua:855 的 get_device 因 get_port_id 返回 nil 而级联失败——SerDes/mode/device 三元组无匹配（WorkMode 不符或 SerDes 不在 valid 范围）。修复：两段式匹配（严格→放宽）、预校验 SerDes 配置。"
+    },
+    "metadata": {"category": "topology", "difficulty": "hard", "expected_max_iterations": 5}
+  },
+  {
+    "input": {
+      "question": "capability_proxy 报 \"invalid file path of operator Administrator\"（file_service.lua:395 附近），帮我看下源码里是怎么回事。",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": ["file_service", "路径", "operator"],
+      "expected_component": "bios",
+      "expected_citations": ["file_service.lua:395"],
+      "expected_tools": ["gather_code_context"],
+      "must_use_source": true,
+      "reference_answer": "应取出 bios 组件 file_service.lua 第 395 行附近的真实源码再下结论；注意日志模板与索引行号可能有偏差，期望 agent 基于实际取到的函数体审慎说明文件路径/归属校验逻辑，而非凭模板硬编。"
+    },
+    "metadata": {"category": "file-access", "difficulty": "hard", "expected_max_iterations": 5}
+  },
+  {
+    "input": {
+      "question": "pcie_device 这个组件主要是做什么的？代码结构和核心职责帮我梳理一下。",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": ["pcie", "拓扑", "设备"],
+      "expected_component": "pcie_device",
+      "expected_citations": [],
+      "expected_tools": ["summarize_component"],
+      "must_use_source": true,
+      "reference_answer": "应先调 summarize_component 拿 pcie_device 概览（文件/符号规模、入口符号、大文件），再概括其职责：PCIe 卡带外管理、拓扑读取与设备加载等。"
+    },
+    "metadata": {"category": "source-qa", "difficulty": "easy", "expected_max_iterations": 3}
+  },
+  {
+    "input": {
+      "question": "pcie_card.lua 里的 pcie_oob_mgmt_init 这个函数具体做了什么？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": ["pcie_oob_mgmt_init", "CAPABILITY", "opcode"],
+      "expected_component": "pcie_device",
+      "expected_citations": [],
+      "expected_tools": ["search_symbols"],
+      "must_use_source": true,
+      "reference_answer": "应按符号名检索 pcie_oob_mgmt_init 的函数体，说明它通过 comm.get_info(chip_info, e_opcode.CAPABILITY) 获取能力 opcode 完成带外管理初始化，失败返回 false。"
+    },
+    "metadata": {"category": "source-qa", "difficulty": "easy", "expected_max_iterations": 3}
+  },
+  {
+    "input": {
+      "question": "日志里哪个组件报错最多？它的高频错误是什么，给我一个总览。",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": ["pcie_device"],
+      "expected_component": "pcie_device",
+      "expected_citations": [],
+      "expected_tools": ["get_errors_by_component"],
+      "must_use_source": false,
+      "reference_answer": "应调日志工具统计各组件错误数，指出 pcie_device 的 'PCIe card oob management init failed' 为最高频错误（约每分钟一次）。"
+    },
+    "metadata": {"category": "log-analysis", "difficulty": "easy", "expected_max_iterations": 3}
+  },
+  {
+    "input": {
+      "question": "certificate 报 \"ca is duplicated, cannot import\" / RootCAAlreadyExists，这是代码哪个函数抛的？给我函数体。",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": ["索引", "未", "无法定位"],
+      "expected_component": "",
+      "expected_citations": [],
+      "expected_tools": [],
+      "must_use_source": true,
+      "reference_answer": "certificate 组件未在本用户构建源码索引（certificate_collection_ca.lua / operation_logger.lua 不在已索引组件中）。期望 agent 调源码工具命中『组件尚未构建源码索引』后如实告知需先建索引，绝不能编造该文件的函数体。"
+    },
+    "metadata": {"category": "negative-ungrounded", "difficulty": "medium", "expected_max_iterations": 4}
+  },
+  {
+    "input": {
+      "question": "sms_proxy.lua(111) 这个报错的根因是什么？贴一下对应源码。",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": ["索引", "未", "无法定位"],
+      "expected_component": "",
+      "expected_citations": [],
+      "expected_tools": [],
+      "must_use_source": true,
+      "reference_answer": "sms_proxy.lua 不在任何已索引组件中。期望 agent 检索源码无果后说明无法定位到源码，建议先为对应组件构建 AST 索引，而非编造函数体。"
+    },
+    "metadata": {"category": "negative-ungrounded", "difficulty": "medium", "expected_max_iterations": 4}
+  },
+  {
+    "input": {
+      "question": "event_management.lua:1139 报错是怎么触发的？源码里看一下。",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": ["索引", "未", "无法定位"],
+      "expected_component": "",
+      "expected_citations": [],
+      "expected_tools": [],
+      "must_use_source": true,
+      "reference_answer": "event_management.lua 不在已索引组件中。期望 agent 检索无果后如实告知无法从源码定位，提示先建索引，而非凭日志硬编根因。"
+    },
+    "metadata": {"category": "negative-ungrounded", "difficulty": "medium", "expected_max_iterations": 4}
+  }
+]
