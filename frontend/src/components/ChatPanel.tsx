@@ -18,18 +18,22 @@ import { useState, useRef, useEffect, type KeyboardEvent, type FormEvent } from 
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
-import { sendChatMessageStream } from '../api/client';
-import type { ChatMessage, SessionMessage } from '../types/log';
+import { sendChatMessageStream, sendFeedback, createSession } from '../api/client';
+import type { ChatMessage, SessionMessage, SessionInfo } from '../types/log';
 import 'highlight.js/styles/github-dark.css';
 import './ChatPanel.css';
 
 interface ChatPanelProps {
-  sessionId: string;
+  /** 当前会话 ID；null = 尚未创建（落地 / 新会话空白态）。
+   *  由父组件持有，首条消息懒创建后经 onSessionCreated 回填。 */
+  sessionId: string | null;
   /** 预加载的会话消息（父组件并行请求后传入，避免冗余 fetch）。
    *  undefined = 加载中，[...] = 已就绪 */
   initialMessages?: SessionMessage[];
   /** 当前会话是否已绑定日志数据集。false = 纯对话模式，空态文案/建议改为通用问答。 */
   hasDataset?: boolean;
+  /** 首条消息触发懒创建后，把新会话同步给父组件（激活 + 加入侧栏 + 持久化）。 */
+  onSessionCreated: (session: SessionInfo) => void;
 }
 
 /** 生成唯一消息 ID */
@@ -93,6 +97,7 @@ export default function ChatPanel({
   sessionId,
   initialMessages,
   hasDataset = true,
+  onSessionCreated,
 }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -104,12 +109,20 @@ export default function ChatPanel({
     output: number;
     total: number;
   } | null>(null);
+  /** 用户对每条 assistant 消息的反馈（msgId -> like/dislike），用于高亮选中态 */
+  const [feedback, setFeedback] = useState<Record<string, 'like' | 'dislike'>>({});
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const streamingMsgIdRef = useRef<string | null>(null);
   const hasStreamingContentRef = useRef(false);
+  /** 当前生效的会话 ID：与 sessionId prop 同步，懒创建后立即在此暂存，
+   *  供同一轮 _sendMessage / handleFeedback 使用（不必等父组件回填 prop）。 */
+  const sidRef = useRef<string | null>(sessionId);
+  /** 懒创建会触发 sessionId 变化从而引发恢复 effect；置位后跳过下一次恢复，
+   *  避免空历史覆盖正在进行的消息流。 */
+  const suppressRestoreRef = useRef(false);
 
   /**
    * 滚动到消息列表底部。
@@ -130,17 +143,43 @@ export default function ChatPanel({
     scrollToBottom();
   }, [messages, isThinking]);
 
+  // 切换会话时清空反馈选中态（避免上一会话的点赞高亮残留到新会话）
+  useEffect(() => {
+    setFeedback({});
+  }, [sessionId]);
+
   /**
-   * 组件挂载时恢复会话历史。
+   * 父组件切换会话时 sessionId 变化，同步到 ref（_sendMessage / handleFeedback 取此值）。
+   * 懒创建时父组件也会回填新值，这里跟进（值已一致，无害）。
+   */
+  useEffect(() => {
+    sidRef.current = sessionId;
+  }, [sessionId]);
+
+  /**
+   * 恢复 / 切换会话历史。
    *
    * initialMessages 协议：
    * - undefined  = 父组件正在加载中，等待（不自行 fetch）
    * - []          = 空会话（新会话），直接显示空状态
    * - [...]       = 预加载的消息，直接展示
+   *
+   * 懒创建会让 sessionId 从 null → 新值从而触发本 effect，但此时首轮消息流
+   * 正在进行，绝不能用空历史覆盖 —— 用 suppressRestoreRef 跳过这一次。
+   * 切换会话（用户主动切换）时 initialMessages 同步变化，正常恢复并重置瞬时态。
    */
   useEffect(() => {
-    // 父组件还在加载中，等待其提供数据
+    // 懒创建回填：sessionId 由 null → 新值触发本 effect，但首轮消息流正在进行，
+    // 绝不能覆盖 —— 最优先跳过（无论 initialMessages 此刻是什么）。
+    if (suppressRestoreRef.current) {
+      suppressRestoreRef.current = false;
+      return;
+    }
+
     if (initialMessages === undefined) {
+      // 父组件正在加载下一会话：立即清空并显示加载态，避免残留上一会话的消息
+      setMessages([]);
+      setIsRestoring(true);
       return;
     }
 
@@ -148,11 +187,49 @@ export default function ChatPanel({
     const restored = sessionMessagesToChatMessages(initialMessages);
     setMessages(restored);
     setIsRestoring(false);
+    // 切换会话：重置上一会话残留的瞬时态（原先靠 key 重挂载清理，现改为受控重置）
+    setLastUsage(null);
+    setFeedback({});
+    abortControllerRef.current?.abort();
+    setIsThinking(false);
   }, [sessionId, initialMessages]);
 
   /** 发送消息（内部实现，使用 SSE 流式） */
   async function _sendMessage(text: string) {
     if (isThinking) return;
+
+    // 懒创建：落地 / 新会话空白态下首次发消息时才在后端建会话。
+    // 建好后回填父组件（激活 + 侧栏 + 持久化），并抑制随之而来的恢复 effect，
+    // 避免空历史覆盖刚发出的用户消息。
+    let sid = sidRef.current;
+    if (!sid) {
+      try {
+        const created = await createSession(null);
+        sid = created.session_id;
+        suppressRestoreRef.current = true;
+        sidRef.current = sid;
+        onSessionCreated({
+          session_id: created.session_id,
+          dataset_id: created.dataset_id,
+          created_at: created.created_at,
+          updated_at: created.created_at,
+          message_count: 0,
+          title: '',
+        });
+      } catch (e) {
+        console.error('Failed to create session for chat:', e);
+        setMessages([
+          {
+            id: genId(),
+            role: 'assistant',
+            content: '⚠️ 创建会话失败，请检查网络后重试。',
+            timestamp: formatTime(),
+          },
+        ]);
+        setIsRestoring(false);
+        return;
+      }
+    }
 
     // 创建新的 AbortController
     const controller = new AbortController();
@@ -184,7 +261,7 @@ export default function ChatPanel({
     try {
       // 3. 流式消费 SSE 事件
       for await (const event of sendChatMessageStream(
-        { message: text, session_id: sessionId },
+        { message: text, session_id: sid },
         controller.signal,
       )) {
         switch (event.type) {
@@ -211,7 +288,16 @@ export default function ChatPanel({
             break;
 
           case 'done':
-            // 流正常结束
+            // 流正常结束：把后端回传的 trace_id 挂到这条消息上，供点赞/踩打分关联
+            if (event.trace_id) {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === placeholderId
+                    ? { ...msg, traceId: event.trace_id }
+                    : msg,
+                ),
+              );
+            }
             break;
 
           case 'usage':
@@ -295,6 +381,27 @@ export default function ChatPanel({
     _sendMessage(suggestion);
   }
 
+  /** 点赞/踩：乐观更新选中态，失败回退；不带 traceId 的消息忽略（如历史恢复的消息） */
+  async function handleFeedback(
+    msgId: string,
+    traceId: string | undefined,
+    kind: 'like' | 'dislike',
+  ) {
+    const sid = sidRef.current;
+    if (!sid || !traceId || isThinking) return;
+    const prev = feedback[msgId];
+    setFeedback((f) => ({ ...f, [msgId]: kind }));
+    try {
+      await sendFeedback({
+        trace_id: traceId,
+        session_id: sid,
+        feedback: kind,
+      });
+    } catch {
+      setFeedback((f) => ({ ...f, [msgId]: prev }));
+    }
+  }
+
   /** 键盘事件：Enter 发送，Shift+Enter 换行 */
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -367,6 +474,28 @@ export default function ChatPanel({
                   msg.content
                 )}
               </div>
+              {msg.role === 'assistant' && msg.traceId && (
+                <div className="message-feedback">
+                  <button
+                    type="button"
+                    className={`feedback-btn ${feedback[msg.id] === 'like' ? 'active like' : ''}`}
+                    onClick={() => handleFeedback(msg.id, msg.traceId, 'like')}
+                    disabled={isThinking}
+                    title="有帮助"
+                  >
+                    👍
+                  </button>
+                  <button
+                    type="button"
+                    className={`feedback-btn ${feedback[msg.id] === 'dislike' ? 'active dislike' : ''}`}
+                    onClick={() => handleFeedback(msg.id, msg.traceId, 'dislike')}
+                    disabled={isThinking}
+                    title="没帮助"
+                  >
+                    👎
+                  </button>
+                </div>
+              )}
               <span className="message-time">{msg.timestamp}</span>
             </div>
           ))}

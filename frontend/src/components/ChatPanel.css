@@ -383,6 +383,57 @@
   flex-shrink: 0;
 }
 
+/* ---- 点赞 / 踩反馈按钮（仅 assistant 消息）---- */
+.message-feedback {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  align-self: flex-end;
+}
+
+.feedback-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: background 0.15s, color 0.15s, opacity 0.15s, border-color 0.15s;
+}
+
+.feedback-btn:hover:not(:disabled) {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.feedback-btn.active {
+  opacity: 1;
+}
+
+.feedback-btn.active.like {
+  color: var(--accent-ok);
+  border-color: rgba(50, 215, 75, 0.4);
+  background: rgba(50, 215, 75, 0.12);
+}
+
+.feedback-btn.active.dislike {
+  color: var(--accent-alert);
+  border-color: rgba(255, 69, 58, 0.4);
+  background: rgba(255, 69, 58, 0.12);
+}
+
+.feedback-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.3;
+}
+
 .chat-input-area .chat-input {
   flex: 1;
   background: #252525;

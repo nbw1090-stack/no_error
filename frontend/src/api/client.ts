@@ -227,6 +227,32 @@ export async function* sendChatMessageStream(
 }
 
 /**
+ * 提交用户对一轮 AI 回复的反馈（点赞 / 踩），后端据此给对应 trace 打 Langfuse score。
+ *
+ * @param payload trace_id（来自 chat 响应 / SSE done）+ session_id + feedback
+ */
+export async function sendFeedback(payload: {
+  trace_id: string;
+  session_id: string;
+  feedback: 'like' | 'dislike';
+  comment?: string;
+}): Promise<{ ok: boolean }> {
+  const response = await fetch(`${API_BASE}/feedback`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload),
+  });
+
+  if (response.status === 401) onUnauthorized();
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    throw new Error(errorData?.detail || `服务器错误: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+/**
  * 上传 tar.gz 文件并以 SSE 流式接收解析进度。
  *
  * 事件序列：progress(extracting|parsing) → summary → done

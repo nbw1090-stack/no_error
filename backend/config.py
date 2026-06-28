@@ -132,6 +132,10 @@ class LangfuseConfig:
     public_key: str = ""
     secret_key: str = ""
     host: str = "https://cloud.langfuse.com"
+    # Prompt Management：托管「数据分析模式」system prompt 的 Langfuse prompt 名 / 标签。
+    # 拉取失败时 agent 自动回退到本地 build_system_prompt（保持优雅降级约定）。
+    prompt_name: str = "bmc-system"
+    prompt_label: str = "production"
 
     @classmethod
     def from_env(cls) -> "LangfuseConfig":
@@ -140,6 +144,8 @@ class LangfuseConfig:
             public_key=os.getenv("LANGFUSE_PUBLIC_KEY", ""),
             secret_key=os.getenv("LANGFUSE_SECRET_KEY", ""),
             host=os.getenv("LANGFUSE_BASE_URL", os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")),
+            prompt_name=os.getenv("LANGFUSE_PROMPT_NAME", "bmc-system"),
+            prompt_label=os.getenv("LANGFUSE_PROMPT_LABEL", "production"),
         )
 
 

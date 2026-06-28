@@ -17,9 +17,15 @@ Agent 采用 **ReAct（Reasoning + Acting）** 模式：
 - **日志工具**（[tools/log_tools.py](../backend/agent/tools/log_tools.py)）：对已上传数据集做搜索 / 过滤 / 统计 / 时间线 / 上下文检索；
 - **源码工具**（[tools/source_tools.py](../backend/agent/tools/source_tools.py)）：当组件已构建 AST 索引时，按 `file:line` 反查函数体、兄弟符号、跨文件调用点，做源码级根因诊断。
 
-两种运行模式：
-- **有数据集模式**：会话绑定了 `dataset_id`，注入数据上下文 + 工具，Agent 可调用工具分析日志；
-- **纯对话模式**：会话未绑定数据集（`dataset=None`），不暴露任何工具，仅做通用 BMC 问答。
+工具按 **group** 暴露（`log` / `source`），由此派生三种运行模式：
+
+| 模式 | 触发条件 | 暴露的工具组 | 系统提示词 |
+|------|----------|--------------|------------|
+| **数据分析** | 会话绑定 `dataset_id` | `log`（+ `source`，若该用户已索引组件） | `ROLE` + `DATA_CONTEXT` + `TOOL_GUIDANCE`（+ `SOURCE_GUIDANCE`） |
+| **纯源码问答** | 无数据集，但用户已构建 AST 索引 | `source` | `QA_SOURCE_ROLE` + `SOURCE_GUIDANCE` |
+| **通用问答** | 无数据集、无任何索引 | 无（`tool_schemas=[]`） | `QA_ROLE` + `QA_GUIDANCE` |
+
+> 关键：**「无数据集」不等于「无工具」**——只要用户为某组件建过源码索引，即使没上传日志，Agent 仍会拿到源码工具做代码级问答。
 
 ---
 
@@ -93,12 +99,13 @@ session = self.session_manager.get(session_id)
 
 ### 步骤 ② 构建系统提示词
 
-调用 `build_system_prompt()`（[prompts/system.py](../backend/agent/prompts/system.py)），按模式分支：
+数据分析模式优先用 **Langfuse 托管 prompt**（`_resolve_system_prompt`：拉取成功就 `compile` 注入变量，任何异常/非数据分析模式都回退本地 `build_system_prompt()`，绝不抛错阻断 LLM 调用）。本地 `build_system_prompt()`（[prompts/system.py](../backend/agent/prompts/system.py)）按模式分支：
 
-- **有数据集**：`ROLE`（角色）+ `DATA_CONTEXT`（注入实时统计：总行数 / 各级别计数 / 组件清单 / 时间范围）+ `TOOL_GUIDANCE`（工具使用指导）。若用户已索引过源码组件，再追加 `SOURCE_GUIDANCE`，引导 LLM 在涉及代码的问题上**优先调用** `gather_code_context` 拿代码证据再下结论。
-- **无数据集**：仅 `QA_ROLE` + `QA_GUIDANCE`，明确告知「未上传日志、无工具」，做通用知识问答。
+- **数据分析**：`ROLE`（角色）+ `DATA_CONTEXT`（注入实时统计：总行数 / 各级别计数 / 组件清单 / 时间范围）+ `TOOL_GUIDANCE`（工具使用指导）。若用户已索引过源码组件，再追加 `SOURCE_GUIDANCE`，引导 LLM 在涉及代码的问题上**优先调用** `gather_code_context` 拿代码证据再下结论。
+- **纯源码问答**（无数据集但有索引）：`QA_SOURCE_ROLE` + `SOURCE_GUIDANCE`，明确「无日志、但可查源码」。
+- **通用问答**（无数据集、无索引）：仅 `QA_ROLE` + `QA_GUIDANCE`，明确告知「未上传日志、无工具」，做通用知识问答。
 
-源码组件清单通过 `_load_source_components(user_id)` 查询 AST 库得到（同步 SQLite 查询经 `asyncio.to_thread` 调度，避免阻塞事件循环）。
+源码组件清单通过 `_load_source_components(user_id)` 查询 AST 库得到（同步 SQLite 查询经 `asyncio.to_thread` 调度，避免阻塞事件循环）；以 `session.user_id` 为准，无登录时返回空列表。
 
 ### 步骤 ③ 写入用户消息
 
@@ -110,11 +117,16 @@ self.session_manager.add_message(session_id, {"role": "user", "content": user_me
 
 ### 步骤 ④ 决定工具集合
 
+按 group 计算 `exposed_groups`，再据此取 schema：
+
 ```python
-tool_schemas = ToolRegistry.get_schemas() if dataset else []
+exposed_groups = set()
+if dataset is not None:        exposed_groups.add("log")     # 日志工具需要数据集
+if source_components:          exposed_groups.add("source")  # 源码工具只需已索引组件
+tool_schemas = ToolRegistry.get_schemas(groups=exposed_groups) if exposed_groups else []
 ```
 
-**纯对话模式不暴露任何工具**（`tool_schemas=[]`），LLM 不会、也无法发起工具调用。
+源码工具执行时需要一个带 `user_id` 的 dataset，因此无日志会话会构造一个空壳 `effective_dataset = LogDataset(entries=[], summary={}, user_id=uid)`。只有 `exposed_groups` 为空（既无数据集又无索引）时，`tool_schemas=[]`，LLM 不会、也无法发起工具调用。
 
 ### 步骤 ⑤ ReAct 循环（见下一节）
 
@@ -138,7 +150,7 @@ tool_schemas = ToolRegistry.get_schemas() if dataset else []
 
 **注意：按 `tool_calls` 是否存在判断，而非 `finish_reason`。** 某些 OpenAI 兼容服务在返回 tool_calls 时仍给出非 `"tool_calls"` 的 `finish_reason`，若依赖它会工具永不执行（[core.py:336-340](../backend/agent/core.py#L336) 有专门注释）。
 
-- **有 `tool_calls` 且有数据集** → 工具调用轮：
+- **有 `tool_calls` 且 `exposed_groups` 非空** → 工具调用轮：
   1. 保存含 `tool_calls` 的 assistant 消息到会话（流式版只存一次）；
   2. 逐个解析工具调用（`function.name` + `json.loads(arguments)`，解析失败兜底为 `{}`）；
   3. 流式版先 `yield {"type":"tool_progress","status":"start"}`；
@@ -153,6 +165,62 @@ tool_schemas = ToolRegistry.get_schemas() if dataset else []
 ### 6.4 超限兜底
 
 若循环耗尽 `max_iterations` 仍未得到最终回复，返回固定提示「分析过程较为复杂，已超出当前处理轮次限制……」（流式版逐词输出）。
+
+### 6.5 上下文装配（分层视图）
+
+每次调用 LLM，发送的并不是单一文本，而是 **`messages[]`（对话上下文）+ `tools[]`（工具 schema）** 两个并列结构。`messages[]` 由 `ConversationContext.build_messages()` 按固定顺序「系统提示词 → 裁剪后历史 → 当前用户消息」分层装配，各层数据来源不同：
+
+```
+                          一次 LLM 请求 = messages[]  +  tools[]
+                                          ▲              ▲
+        ┌─────────────────────────────────┘              └────────────────┐
+        │                                                                  │
+╔═══════╧══════════════════════════════════════════════════╗   ╔══════════╧═══════════╗
+║  messages[] —— 对话上下文（自顶向下分层）                  ║   ║  tools[] —— 工具清单  ║
+╠══════════════════════════════════════════════════════════╣   ╠══════════════════════╣
+║                                                            ║   ║ ToolRegistry         ║
+║ ┌─ Layer 0 ─ System Prompt（1 条 role=system）──────────┐ ║   ║   .get_schemas(      ║
+║ │  build_system_prompt() 按模式拼装 PromptTemplate 块：  │ ║   ║     groups=          ║
+║ │                                                        │ ║   ║     exposed_groups)  ║
+║ │  ● 数据分析模式                                        │ ║   ║                      ║
+║ │     ROLE_PROMPT                角色定义                │ ║   ║ exposed_groups:      ║
+║ │   + DATA_CONTEXT_PROMPT  ◀── 动态注入 dataset.summary │ ║   ║   "log"  ◀ 有数据集   ║
+║ │       total_lines / error·warn·notice·launch_count    │ ║   ║   "source" ◀ 有索引   ║
+║ │       component_count / components[:15] / time_range  │ ║   ║                      ║
+║ │   + TOOL_GUIDANCE_PROMPT       工具使用指导            │ ║   ║ ⇒ 日志工具(9) /       ║
+║ │  (+ SOURCE_GUIDANCE_PROMPT ◀── 注入 indexed_components │ ║   ║   源码工具(6) 的      ║
+║ │       仅当该用户已构建 AST 索引)                       │ ║   ║   OpenAI schema      ║
+║ │                                                        │ ║   ╚══════════════════════╝
+║ │  ● 纯源码问答     QA_SOURCE_ROLE + SOURCE_GUIDANCE     │ ║
+║ │  ● 通用问答       QA_ROLE       + QA_GUIDANCE          │ ║      数据来源（旁路）
+║ └────────────────────────────────────────────────────────┘ ║   ┌────────────────────┐
+║                                                            ║   │ dataset.summary     │
+║ ┌─ Layer 1 ─ History（裁剪后）──────────────────────────┐ ║   │   ← datasets/*.json │
+║ │  session.messages 去掉当前用户消息后的全部历史：       │ ║◀──┤ indexed_components   │
+║ │    user / assistant(+tool_calls) / tool(result) 交错   │ ║   │   ← ast.db (per-user)│
+║ │  len > max_history(40) ⇒ 只保留 history[-40:]          │ ║   │ history             │
+║ └────────────────────────────────────────────────────────┘ ║   │   ← sessions/*.json │
+║                                                            ║   └────────────────────┘
+║ ┌─ Layer 2 ─ Current User Message（role=user）──────────┐ ║
+║ │  仅第 0 轮由 build_messages() 显式追加；               │ ║
+║ │  后续轮它已在 session.messages 里，不再单独追加        │ ║
+║ └────────────────────────────────────────────────────────┘ ║
+╚══════════════════════════════════════════════════════════╝
+```
+
+**随迭代的演化**——上下文单调增长，每轮把上一轮的工具调用与结果并入历史：
+
+```
+第 0 轮   messages = [system] + 裁剪历史(session.messages[:-1]) + [当前 user]
+          └ ConversationContext.build_messages(history=..., user_message=...)
+
+第 ≥1 轮  messages = [system] + 完整 session.messages
+          └ 历史已追加上一轮的 assistant(tool_calls) 与 tool(result)
+            ↑ 每执行一次工具就 add_message 落盘，下一轮 LLM 即可见
+            ↑ 直到某轮 LLM 不再返回 tool_calls → 收尾 break
+```
+
+> 三层中只有 **Layer 0 的 `DATA_CONTEXT` / `SOURCE_GUIDANCE` 是每轮重新注入的动态内容**（来自 dataset summary 与 AST 库）；Layer 1/2 是会话历史的累积回放。`tools[]` 与 `messages[]` 并列传入，**不是** `messages` 的成员——它由 `exposed_groups` 决定，模式不变则全程不变。
 
 ---
 
@@ -179,13 +247,16 @@ tool_schemas = ToolRegistry.get_schemas() if dataset else []
 
 工具是 `async` 函数，**第一个位置参数恒为 `dataset: LogDataset`**，其余为 LLM 提供的 kwargs。用 `@ToolRegistry.register(name, description, parameters, required)` 在导入时注册（[registry.py](../backend/agent/tools/registry.py)）。`main.py` 的 `import agent.tools` 触发 `tools/__init__.py` 导入 `log_tools` + `source_tools` 完成注册——**无需其它接线**。
 
-### 8.2 日志工具（9 个）
+### 8.2 日志工具（8 个）
 
-`search_logs`、`filter_by_component`、`filter_by_level`、`get_summary`、`get_component_stats`、`get_time_range`、`get_errors_by_component`、`get_error_timeline`、`get_context_around`。全部对 `dataset.entries` 做内存计算，返回带 `count`/`results` 的结构化 JSON。
+`search_logs`、`filter_by_component`、`filter_by_level`、`get_summary`、`get_time_range`、`get_errors_by_component`、`get_error_digest`、`get_context_around`。全部对 `dataset.entries` 做内存计算，返回结构化 JSON。
 
-### 8.3 源码工具（5 个）
+- `get_summary` 是**一站式概览**：合并了「整体级别计数」与「按组件级别分布」（原先分别由 `get_summary` / `get_component_stats` 提供，两者返回大量重合内容 → 合并为一次调用、仅保留非零字段以省 token）。
+- `get_error_digest` 取代原 `get_error_timeline`：返回所有 ERROR **按消息模板去重**后的精简清单（每种错误一组，含 `count`/首末时间/`interval`/`sample_ids`），而非逐条带时间戳的明细，避免前期分析回喂成百上千条仅时间不同的重复错误。精确原文/上下文用 `sample_ids` 调 `get_context_around` 或明细工具 `dedup=false` 按需下钻。
 
-`get_function_source`、`search_symbols`、`list_source_files`、`get_file_source`、`gather_code_context`。它们读取 `dataset.user_id`，调用 `ast_analysis.db` 按 `(user_id, component, ...)` 查 AST，从源码快照切出带行号的函数体。`gather_code_context` 是**高层聚合入口**：一次调用汇聚「目标函数体 + 同文件兄弟符号 + 跨文件调用点」，替代多轮 `search → get_source → 找调用方`。
+### 8.3 源码工具（6 个，`group="source"`）
+
+`get_function_source`、`search_symbols`、`list_source_files`、`summarize_component`、`get_file_source`、`gather_code_context`。它们读取 `dataset.user_id`，调用 `ast_analysis.db` 按 `(user_id, component, ...)` 查 AST，从源码快照切出带行号的函数体。`gather_code_context` 是**高层聚合入口**：一次调用汇聚「目标函数体 + 同文件兄弟符号 + 跨文件调用点」，替代多轮 `search → get_source → 找调用方`。
 
 ### 8.4 错误隔离
 
@@ -221,6 +292,15 @@ chat                         （顶层 trace，HTTP 层开启）
 ```
 
 每个请求结束时 HTTP 层调用 `tracer.flush()` 立即上报。在 Langfuse 控制台可观测：每轮 LLM 的输入/输出/token、工具调用参数与返回、整体耗时与迭代轮数。
+
+### Token 用量统计
+
+每轮 LLM 返回的 `usage`（`input` / `output` / `total`）由 `_accumulate_usage` 累加进整轮 `totals`：
+
+- **同步 `run`**：调用方传入一个空 `usage` dict，方法把整轮 `totals` 写回；HTTP 层将其挂到 chat trace 的 metadata（`total_input_tokens` 等），并随 `/api/chat` 响应的 `usage` 字段返回前端。
+- **流式 `run_stream`**：在 `done` 之前先 `yield {"type":"usage", input, output, total}` 事件；HTTP 层捕获后同样写入 trace metadata，并经 SSE 透传前端展示本轮 token 消耗。
+
+> `usage` 是调用级元数据，**不进会话历史**（`response.pop("usage")`），避免回放给 LLM 时混入多余字段。Agent 为单例，token 累加器每个请求新建独立 dict，不暂存为实例属性。
 
 ---
 
@@ -266,7 +346,7 @@ chat                         （顶层 trace，HTTP 层开启）
 | 不变式 | 说明 |
 |--------|------|
 | **按 `tool_calls` 判定，而非 `finish_reason`** | OpenAI 兼容服务 finish_reason 不可靠，否则工具永不执行 |
-| **无数据集 = 无工具** | 纯对话模式 `tool_schemas=[]`，从源头杜绝工具调用 |
+| **工具按 group 暴露** | `log` 需数据集、`source` 需已索引组件；两者皆无才 `tool_schemas=[]` 杜绝工具调用 |
 | **工具异常不击穿循环** | `ToolRegistry.execute` 捕获一切，错误以 JSON 回喂 LLM |
 | **每步落盘** | user/assistant/tool 消息即时持久，跨轮 / 恢复 / 崩溃皆安全 |
 | **流式 tool_calls 按 index 累积** | 半截 JSON 不可见，`finish_reason` 后才整体产出 |

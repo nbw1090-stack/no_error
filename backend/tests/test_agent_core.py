@@ -111,6 +111,61 @@ async def test_react_records_messages_passed_to_llm(tmp_path, sample_dataset, tc
     assert first_call["tools"] == ToolRegistry.get_schemas(groups={"log"})
 
 
+async def test_react_last_iteration_forces_answer_without_tools(
+    tmp_path, sample_dataset, tc
+):
+    # 最后一轮应收走工具 + 注入收尾指令，逼模型用已有信息直接作答
+    agent, _, session = _new_agent(
+        tmp_path, [[tc("get_summary", {})], "最终答案"], max_iterations=2
+    )
+    reply = await agent.run(session.session_id, "q", sample_dataset)
+    assert reply == "最终答案"
+    last_call = agent.llm.calls[-1]
+    assert last_call["tools"] == []  # 最后一轮不暴露工具
+    assert any(
+        m["role"] == "system" and "最后一步" in m["content"]
+        for m in last_call["messages"]
+    )
+
+
+async def test_react_repeated_unproductive_call_warns(tmp_path, sample_dataset, tc):
+    # 同一工具+同参数连续返回 error（无效）→ 第二次结果追加换策略提示
+    agent, sm, session = _new_agent(
+        tmp_path,
+        [
+            [tc("does_not_exist", {}, "c1")],
+            [tc("does_not_exist", {}, "c2")],
+            "done",
+        ],
+    )
+    reply = await agent.run(session.session_id, "q", sample_dataset)
+    assert reply == "done"
+    tool_msgs = [
+        m for m in sm.get(session.session_id).messages if m["role"] == "tool"
+    ]
+    assert len(tool_msgs) == 2
+    assert "调用策略提示" not in tool_msgs[0]["content"]  # 第一次不提示
+    assert "调用策略提示" in tool_msgs[1]["content"]  # 第二次提示换策略
+    assert "does_not_exist" in tool_msgs[1]["content"]
+
+
+async def test_react_distinct_calls_not_warned(tmp_path, sample_dataset, tc):
+    # 同工具但参数不同（不同符号名）→ 不算重复，不应提示
+    agent, sm, session = _new_agent(
+        tmp_path,
+        [
+            [tc("does_not_exist", {"name": "a"}, "c1")],
+            [tc("does_not_exist", {"name": "b"}, "c2")],
+            "done",
+        ],
+    )
+    await agent.run(session.session_id, "q", sample_dataset)
+    tool_msgs = [
+        m for m in sm.get(session.session_id).messages if m["role"] == "tool"
+    ]
+    assert all("调用策略提示" not in m["content"] for m in tool_msgs)
+
+
 # ============================================================
 # run_stream() 流式
 # ============================================================
@@ -185,6 +240,24 @@ async def test_stream_max_iter_yields_fallback_then_done(tmp_path, sample_datase
     assert deltas
     assert "超出当前处理轮次限制" in deltas[0]["text"]
     assert events[-1]["type"] == "done"
+
+
+async def test_stream_last_iteration_forces_answer_without_tools(
+    tmp_path, sample_dataset, tc
+):
+    # 流式版与 run() 一致：最后一轮收走工具 + 注入收尾指令
+    agent, _, session = _new_agent(
+        tmp_path, [[tc("get_summary", {})], "收尾回答"], max_iterations=2
+    )
+    events = await _collect(agent, session.session_id, "q", sample_dataset)
+    texts = "".join(e["text"] for e in events if e["type"] == "delta")
+    assert "收尾回答" in texts
+    last_call = agent.llm.stream_calls[-1]
+    assert last_call["tools"] == []
+    assert any(
+        m["role"] == "system" and "最后一步" in m["content"]
+        for m in last_call["messages"]
+    )
 
 
 async def test_stream_empty_reply_retries(tmp_path, sample_dataset):

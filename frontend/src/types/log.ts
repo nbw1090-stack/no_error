@@ -59,6 +59,8 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   timestamp: string;
+  /** 后端为本轮生成的 trace_id（来自 SSE done），用于点赞/踩关联到 Langfuse trace */
+  traceId?: string;
 }
 
 /** 聊天请求（简化：只需 message + session_id，历史由服务端管理） */
@@ -70,6 +72,8 @@ export interface ChatRequest {
 /** 聊天响应 */
 export interface ChatResponse {
   reply: string;
+  /** 后端为本轮生成的 trace_id，用于点赞/踩关联到 Langfuse trace */
+  trace_id?: string;
   /** 整轮对话的 token 消耗（降级模式为 0） */
   usage?: {
     input: number;
@@ -117,6 +121,8 @@ export interface StreamEvent {
   text?: string;
   tool?: string;
   status?: string;
+  /** type === 'done' 时携带：后端为本轮生成的 trace_id，用于点赞/踩关联 */
+  trace_id?: string;
   /** type === 'usage' 时携带：整轮对话的 token 消耗 */
   input?: number;
   output?: number;

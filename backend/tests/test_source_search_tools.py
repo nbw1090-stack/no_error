@@ -54,6 +54,29 @@ def fake_clone(monkeypatch):
     monkeypatch.setattr(svc.downloader, "remote_commit", _fake_remote)
 
 
+@pytest.fixture
+def fake_clone_dup(monkeypatch):
+    """clone 写两个同名 init.lua（不同目录），用于验证 basename 歧义/精确优先。"""
+    sha = "ccccccc000000000000000000000000000000cccc"
+
+    def _fake_clone(git_url, branch, dest_dir, timeout=300):
+        # include/ 字母序在 src/ 之前——旧实现会让它覆盖精确路径
+        for rel in ("include/init.lua", "src/lib/init.lua"):
+            p = os.path.join(dest_dir, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(_SRC)
+        return sha
+
+    def _fake_remote(git_url, branch, timeout=30):
+        return sha
+
+    import ast_analysis.service as svc
+
+    monkeypatch.setattr(svc.downloader, "clone_component", _fake_clone)
+    monkeypatch.setattr(svc.downloader, "remote_commit", _fake_remote)
+
+
 def _analyze(authed, names):
     """发起一次 /api/ast/analyze，返回事件列表（同步 TestClient）。"""
     resp = authed["client"].post(
@@ -180,6 +203,75 @@ async def test_get_file_source_basename_match(authed, fake_clone):
         authed["user_id"],
     )
     assert result["rel_path"] == "main.lua"
+
+
+async def test_get_file_source_offset_pagination(authed, fake_clone):
+    """offset 翻页：从第 9 行起读，只返回尾部 3 行且行号真实。"""
+    _analyze(authed, ["sensor"])
+    result = await _exec_tool(
+        "get_file_source",
+        {"component": "sensor", "file": "main.lua", "offset": 9, "max_lines": 5},
+        authed["user_id"],
+    )
+    assert result["start_line"] == 9
+    assert result["end_line"] == 11
+    assert result["shown_lines"] == 3
+    assert result["truncated"] is False
+    # 行号真实（从 9 起），且只含尾部函数
+    assert result["source"].splitlines()[0].lstrip().startswith("9")
+    assert "read_sensor_value" in result["source"]
+    assert "init_card" not in result["source"]
+
+
+async def test_get_file_source_truncation_hints_next_offset(authed, fake_clone):
+    """读前 3 行应提示用 offset=4 续读。"""
+    _analyze(authed, ["sensor"])
+    result = await _exec_tool(
+        "get_file_source",
+        {"component": "sensor", "file": "main.lua", "max_lines": 3},
+        authed["user_id"],
+    )
+    assert result["truncated"] is True
+    assert (result["start_line"], result["end_line"]) == (1, 3)
+    assert "offset=4" in result["hint"]
+
+
+async def test_get_file_source_offset_past_eof(authed, fake_clone):
+    """offset 超出文件 → 空窗口 + 提示，不报 truncated。"""
+    _analyze(authed, ["sensor"])
+    result = await _exec_tool(
+        "get_file_source",
+        {"component": "sensor", "file": "main.lua", "offset": 999},
+        authed["user_id"],
+    )
+    assert result["shown_lines"] == 0
+    assert result["truncated"] is False
+    assert "超出文件范围" in result["hint"]
+
+
+async def test_get_file_source_exact_path_beats_basename(authed, fake_clone_dup):
+    """精确 rel_path 必须命中自身，不被字母序靠前的同名文件覆盖（本次根因修复）。"""
+    _analyze(authed, ["sensor"])
+    result = await _exec_tool(
+        "get_file_source",
+        {"component": "sensor", "file": "src/lib/init.lua"},
+        authed["user_id"],
+    )
+    assert result["rel_path"] == "src/lib/init.lua"
+
+
+async def test_get_file_source_ambiguous_basename_returns_candidates(
+    authed, fake_clone_dup
+):
+    """只给 basename 且多个同名文件 → 返回候选列表，而非闷头返回错文件。"""
+    _analyze(authed, ["sensor"])
+    result = await _exec_tool(
+        "get_file_source",
+        {"component": "sensor", "file": "init.lua"},
+        authed["user_id"],
+    )
+    assert result["error"].startswith("文件名不唯一")
+    assert set(result["candidates"]) == {"include/init.lua", "src/lib/init.lua"}
 
 
 async def test_get_file_source_not_found(authed, fake_clone):

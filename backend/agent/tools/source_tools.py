@@ -394,7 +394,12 @@ async def summarize_component(
             },
             "max_lines": {
                 "type": "integer",
-                "description": "最多返回的行数，超过则截断，默认 200",
+                "description": "从起始行起最多返回的行数，超过则截断，默认 200",
+            },
+            "offset": {
+                "type": "integer",
+                "description": "起始行号（1-based）；用于翻页读取长文件，"
+                "缺省或 <=0 表示从第 1 行开始。配合上次返回的 hint 中的 offset 续读。",
             },
         },
         "required": ["component", "file"],
@@ -406,8 +411,9 @@ async def get_file_source(
     component: str,
     file: str,
     max_lines: int = 200,
+    offset: int = 0,
 ) -> dict:
-    """按文件名取整个源码文件。"""
+    """按文件名取整个源码文件（支持 offset 翻页）。"""
     from ast_analysis import db
 
     user_id = dataset.user_id
@@ -418,14 +424,16 @@ async def get_file_source(
     if not files:
         return _not_found_payload(user_id, component)
 
-    # 先按精确 rel_path 匹配，匹配不到再退化为 basename 匹配
-    target = None
-    basename_input = os.path.basename(file or "")
-    for f in files:
-        if f["rel_path"] == file or os.path.basename(f["rel_path"]) == basename_input:
-            target = f["rel_path"]
-            break
-
+    target = _match_source_file(files, file)
+    # 文件名歧义（多个同名文件）：返回候选让 LLM 用完整相对路径重试，
+    # 而非按列表顺序闷头返回某一个（旧实现会因字母序误返回错文件）。
+    if isinstance(target, list):
+        return {
+            "error": "文件名不唯一，存在多个同名文件，请用完整相对路径重新调用",
+            "component": component,
+            "file": file,
+            "candidates": target,
+        }
     if target is None:
         return {
             "error": "未找到匹配的源码文件",
@@ -435,21 +443,64 @@ async def get_file_source(
         }
 
     cap = max(1, max_lines)
-    source, total, truncated = _read_file_source(user_id, component, target, cap)
+    start_off = offset if offset and offset > 0 else 0
+    source, total, start_line, shown = _read_file_source(
+        user_id, component, target, cap, start_off
+    )
+    end_line = start_line + shown - 1 if shown else 0
+    has_more = shown > 0 and end_line < total  # 窗口之后仍有内容
     result = {
         "component": component,
         "rel_path": target,
         "total_lines": total,
-        "shown_lines": min(total, cap),
-        "truncated": truncated,
+        "start_line": start_line,
+        "end_line": end_line,
+        "shown_lines": shown,
+        "truncated": has_more,
         "source": source,
     }
-    if truncated:
+    if shown == 0 and total > 0:
         result["hint"] = (
-            f"文件共 {total} 行，已截断展示前 {cap} 行。"
-            "如需查看特定函数，可用 get_function_source 或 search_symbols。"
+            f"offset={start_off} 超出文件范围（共 {total} 行），未返回内容。"
+            f"请用 1~{total} 之间的 offset 重试。"
+        )
+    elif has_more:
+        result["hint"] = (
+            f"文件共 {total} 行，已展示 {start_line}-{end_line} 行。"
+            f"如需后续内容，用 offset={end_line + 1} 续读；"
+            "或用 get_function_source / search_symbols 精确定位某符号。"
         )
     return result
+
+
+def _match_source_file(files: list[dict], file: str):
+    """
+    把请求的 file 解析成唯一 rel_path。
+
+    匹配优先级（修复点）：
+    1. 全表先找**精确 rel_path**——不让 basename 命中抢先（旧实现把精确与
+       basename 放在同一轮 OR 里，配合 ORDER BY rel_path 会让字母序靠前的同名
+       文件覆盖真正想要的精确路径）。
+    2. 无精确命中再按 basename 退化；唯一命中直接用，多个同名文件返回候选列表。
+
+    Returns:
+        命中的 rel_path（str）/ 候选列表（list，歧义）/ None（无匹配）。
+    """
+    for f in files:
+        if f["rel_path"] == file:
+            return f["rel_path"]
+
+    basename_input = os.path.basename(file or "")
+    matches = [
+        f["rel_path"]
+        for f in files
+        if os.path.basename(f["rel_path"]) == basename_input
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        return matches
+    return None
 
 
 def _not_found_payload(
@@ -519,14 +570,18 @@ def _read_source_slice(
 
 
 def _read_file_source(
-    user_id: int, component: str, rel_path: str, max_lines: int
-) -> tuple[str, int, bool]:
+    user_id: int, component: str, rel_path: str, max_lines: int, offset: int = 0
+) -> tuple[str, int, int, int]:
     """
-    读取整个源码文件（带行号），超过 max_lines 则截断。
+    读取源码文件的一个窗口（带**真实行号**），支持从 offset 起翻页。
+
+    Args:
+        max_lines: 从起始行起最多返回的行数。
+        offset: 起始行号（1-based）；<=0 表示从第 1 行开始。
 
     Returns:
-        (带行号的源码, 文件实际总行数, 是否被截断)。文件读不到时源码为空串、
-        总行数 0。
+        (带行号的源码, 文件总行数, 窗口起始行号(1-based), 实际返回行数)。
+        文件读不到时返回 ("", 0, 0, 0)。
     """
     from ast_analysis.service import _component_source_dir
 
@@ -535,15 +590,16 @@ def _read_file_source(
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.read().splitlines()
     except OSError:
-        return ("", 0, False)
+        return ("", 0, 0, 0)
 
     total = len(lines)
-    truncated = total > max_lines
-    show = lines[:max_lines] if truncated else lines
+    start = offset - 1 if offset and offset > 0 else 0
+    start = max(0, min(start, total))  # 越界则收敛到文件尾（窗口为空）
+    window = lines[start:start + max_lines]
     rendered = "\n".join(
-        f"{(i + 1):>5} | {s}" for i, s in enumerate(show)
+        f"{(start + i + 1):>5} | {s}" for i, s in enumerate(window)
     )
-    return (rendered, total, truncated)
+    return (rendered, total, start + 1, len(window))
 
 
 @ToolRegistry.register(

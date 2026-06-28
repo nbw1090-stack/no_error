@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import uuid
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -547,6 +547,7 @@ async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
 
             return {
                 "reply": reply,
+                "trace_id": trace_id,
                 "usage": {
                     "input": usage.get("input", 0),
                     "output": usage.get("output", 0),
@@ -594,6 +595,7 @@ async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
 
         return {
             "reply": reply,
+            "trace_id": trace_id,
             "usage": {"input": 0, "output": 0, "total": 0},
         }
     finally:
@@ -683,7 +685,10 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(get_current_user)):
                         # 同时照常转发给前端展示
                         if event.get("type") == "usage":
                             usage_total = event
-                        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                        if event.get("type") == "done":
+                            # 把后端生成的 trace_id 回传前端，供点赞/踩精确关联到这条 trace
+                            event["trace_id"] = trace_id
+                        yield sse(event)
 
                     trace.update(
                         output={"status": "stream_complete"},
@@ -742,7 +747,7 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(get_current_user)):
                         separator = " " if i < len(words) - 1 else ""
                         yield f"data: {json.dumps({'type': 'delta', 'text': word + separator}, ensure_ascii=False)}\n\n"
                         await asyncio.sleep(0.01)
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    yield sse({"type": "done", "trace_id": trace_id})
                     trace.update(output={"reply": reply[:2000]})
 
         except Exception as e:
@@ -769,6 +774,47 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(get_current_user)):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ============================================================
+# 用户反馈（Langfuse Scores）
+# ============================================================
+class FeedbackRequest(BaseModel):
+    """用户对一轮 AI 回复的反馈（点赞 / 踩）"""
+    trace_id: str
+    session_id: str
+    feedback: Literal["like", "dislike"]
+    comment: Optional[str] = None
+
+
+@app.post("/api/feedback")
+async def feedback(req: FeedbackRequest, user: dict = Depends(get_current_user)):
+    """
+    用户反馈：给指定 trace 打 Langfuse score（user_feedback: like / dislike）。
+
+    trace_id 由后端生成，并随 chat 响应 / SSE done 事件回传前端，前端挂到
+    对应那条 assistant 消息上，点赞/踩时带回来。归属校验：session 必须属于
+    当前用户，且 trace_id 必须在该 session 的 traces 内（防伪造 / 跨用户打分）。
+    score_id 用 {trace_id}-user_feedback 作幂等键：同一 trace 再次反馈会覆盖。
+    """
+    session = session_manager.get(req.session_id, user["id"])
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not any(t.get("trace_id") == req.trace_id for t in session.traces):
+        raise HTTPException(status_code=404, detail="Trace not found")
+
+    tracer = get_client()
+    tracer.score(
+        trace_id=req.trace_id,
+        name="user_feedback",
+        value=req.feedback,
+        data_type="CATEGORICAL",
+        comment=req.comment,
+        score_id=f"{req.trace_id}-user_feedback",
+    )
+    tracer.flush()
+    return {"ok": True}
 
 
 def _generate_reply(message: str, summary: Optional[dict] = None) -> str:

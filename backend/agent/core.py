@@ -21,7 +21,7 @@ from agent.tools.registry import ToolRegistry
 from agent.context import ConversationContext
 from agent.dataset import LogDataset
 from agent.session import SessionManager
-from agent.prompts.system import build_system_prompt
+from agent.prompts.system import build_system_prompt, _format_indexed_components
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,86 @@ def _accumulate_usage(totals: dict, usage: dict | None) -> None:
     totals["input"] += usage.get("input", 0) or 0
     totals["output"] += usage.get("output", 0) or 0
     totals["total"] += usage.get("total", 0) or 0
+
+
+# 最后一轮的收尾指令：该轮禁用工具，逼模型用已有信息直接作答，
+# 避免撞 max_iterations 后只回一句兜底话术、把已收集的素材全丢弃。
+_FINAL_STEP_DIRECTIVE = (
+    "（这是本轮分析的最后一步，已无法再调用任何工具。请基于以上已获取的"
+    "全部信息，直接给出尽可能完整、有用的最终回答——包括已确认的结论、合理"
+    "推断，以及仍存在的信息缺口；不要再请求更多数据。）"
+)
+
+# 同一 (工具, 参数) 重复返回无效信息的告警阈值：达到该次数即提示 LLM 换策略。
+_REPEAT_UNPRODUCTIVE_LIMIT = 2
+
+
+def _tool_signature(func_name: str, func_args: dict) -> str:
+    """把一次工具调用规约成可比对的签名（工具名 + 规范化参数）。"""
+    try:
+        canonical = json.dumps(func_args, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        canonical = repr(func_args)
+    return f"{func_name}|{canonical}"
+
+
+def _is_unproductive_result(result_str: str) -> bool:
+    """
+    判断工具结果是否"未检索到有效信息"：携带 error，或检索类结果为空。
+
+    仅用于在**重复**同一调用时给 LLM 提示——单次空结果是正常的（可能本身
+    就是答案），不视为异常。
+    """
+    try:
+        data = json.loads(result_str)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if data.get("error"):
+        return True
+    # 常见检索类工具的"空结果"计数字段：存在且为 0/空即视为无有效信息
+    empty_keys = (
+        "matches_count",
+        "count",
+        "total_matches",
+        "returned_groups",
+        "files_count",
+    )
+    for k in empty_keys:
+        if k in data and not data[k]:
+            return True
+    if "results" in data and not data["results"]:
+        return True
+    return False
+
+
+def _repeat_guidance(func_name: str, count: int) -> str:
+    """生成"同一调用重复无效"的提示语，附加到工具结果末尾交给 LLM。"""
+    return (
+        f"\n\n⚠️ 调用策略提示：你已用完全相同的参数调用 `{func_name}` {count} 次，"
+        "且每次都未检索到有效信息。请勿再用相同参数重复调用本工具——"
+        "改变策略：换用不同的参数或其它工具，或基于已掌握的信息直接作答。"
+    )
+
+
+def _note_tool_result(
+    counters: dict, func_name: str, func_args: dict, result_str: str
+) -> str:
+    """
+    记录一次工具调用结果；若同一 (工具,参数) 重复返回无效信息达到阈值，
+    在结果末尾追加换策略提示，避免 LLM 对同一工具死循环调用。
+
+    Returns:
+        可能被追加了提示的结果字符串（未触发时原样返回）。
+    """
+    if not _is_unproductive_result(result_str):
+        return result_str
+    sig = _tool_signature(func_name, func_args)
+    counters[sig] = counters.get(sig, 0) + 1
+    if counters[sig] >= _REPEAT_UNPRODUCTIVE_LIMIT:
+        return result_str + _repeat_guidance(func_name, counters[sig])
+    return result_str
 
 
 async def _load_source_components(user_id: int | None) -> list[dict]:
@@ -60,6 +140,53 @@ async def _load_source_components(user_id: int | None) -> list[dict]:
         }
         for c in comps
     ]
+
+
+def _prompt_vars(summary: dict, source_components) -> dict:
+    """
+    把 dataset summary + 已索引组件构造成 system prompt 模板变量。
+    key 与本地 DATA_CONTEXT_PROMPT / SOURCE_GUIDANCE_PROMPT 的 ${var} 同名，
+    也与 Langfuse 托管 prompt 的 {{var}} 一一对应。
+    """
+    components = summary.get("components", [])
+    time_range = summary.get("timeRange", {})
+    return {
+        "total_lines": summary.get("totalLines", 0),
+        "error_count": summary.get("errorCount", 0),
+        "warning_count": summary.get("warningCount", 0),
+        "notice_count": summary.get("noticeCount", 0),
+        "launch_count": summary.get("launchCount", 0),
+        "component_count": len(components),
+        "components": ", ".join(components[:15]),
+        "time_start": time_range.get("start", "unknown"),
+        "time_end": time_range.get("end", "unknown"),
+        "indexed_components": _format_indexed_components(source_components),
+    }
+
+
+def _resolve_system_prompt(summary, source_components) -> str:
+    """
+    解析 system prompt：数据分析模式（summary 非空）优先用 Langfuse 托管版本，
+    拉取失败 / 非数据分析模式回退到本地 build_system_prompt。
+
+    任何异常都回退到本地、绝不抛——保证 prompt 拉取问题不会阻断 LLM 调用。
+    非数据分析模式（无 summary 的 QA / source-QA）直接走本地，不经 Langfuse 托管。
+    """
+    if summary is None:
+        return build_system_prompt(None, source_components)
+
+    from config import AppConfig
+
+    lf = AppConfig.from_env().langfuse
+    prompt = get_client().get_prompt(lf.prompt_name, lf.prompt_label)
+    if prompt is not None:
+        try:
+            return prompt.compile(**_prompt_vars(summary, source_components))
+        except Exception as e:
+            logger.warning(
+                "Langfuse prompt compile failed, fallback to local: %s", e
+            )
+    return build_system_prompt(summary, source_components)
 
 
 class Agent:
@@ -124,7 +251,7 @@ class Agent:
         # 数据上下文仅在有日志时注入。
         uid = getattr(session, "user_id", 0)
         source_components = await _load_source_components(uid)
-        system_prompt = build_system_prompt(
+        system_prompt = _resolve_system_prompt(
             dataset.summary if dataset is not None else None, source_components
         )
         ctx = ConversationContext(
@@ -162,11 +289,16 @@ class Agent:
         # ---- 5. ReAct 循环 ----
         final_reply = ""
         totals = {"input": 0, "output": 0, "total": 0}  # 整轮 token 累计
+        # 同一 (工具,参数) 无效调用计数，用于检测对工具的死循环调用
+        unproductive_calls: dict[str, int] = {}
 
         for iteration in range(self.max_iterations):
             session = self.session_manager.get(session_id)
             if not session:
                 raise ValueError(f"Session lost during run: {session_id}")
+
+            # 最后一轮：禁用工具 + 注入收尾指令，强制 LLM 用已有信息直接作答
+            is_last = iteration == self.max_iterations - 1
 
             if iteration == 0:
                 messages = ctx.build_messages(
@@ -176,6 +308,10 @@ class Agent:
             else:
                 messages = [{"role": "system", "content": system_prompt}]
                 messages.extend(session.messages)
+            if is_last and exposed_groups:
+                messages.append(
+                    {"role": "system", "content": _FINAL_STEP_DIRECTIVE}
+                )
 
             logger.debug(
                 "ReAct iteration %d: %d messages",
@@ -193,7 +329,9 @@ class Agent:
             ) as iter_span:
 
                 # ---- 调用 LLM（generation 自动嵌套到 iter_span 下） ----
-                response = await self.llm.chat(messages, tool_schemas)
+                # 最后一轮不暴露工具，逼模型产出文本而非又一轮 tool_calls。
+                offered_tools = [] if is_last else tool_schemas
+                response = await self.llm.chat(messages, offered_tools)
 
                 # 累计本轮 token 消耗（适配器未带 usage 时按 0）
                 _accumulate_usage(totals, response.get("usage"))
@@ -203,8 +341,8 @@ class Agent:
                 # 保存助手消息到会话
                 self.session_manager.add_message(session_id, response)
 
-                # ---- 检查是否有工具调用（无数据集时不执行工具）----
-                if response.get("tool_calls") and exposed_groups:
+                # ---- 检查是否有工具调用（无数据集 / 最后一轮不执行工具）----
+                if response.get("tool_calls") and exposed_groups and not is_last:
                     for tc in response["tool_calls"]:
                         func_name = tc["function"]["name"]
                         try:
@@ -233,6 +371,11 @@ class Agent:
                             tool_span.update(
                                 output={"result": result_str[:2000]},
                             )
+
+                        # 同一调用反复无效时，给结果追加换策略提示
+                        result_str = _note_tool_result(
+                            unproductive_calls, func_name, func_args, result_str
+                        )
 
                         # 将工具结果加入会话
                         self.session_manager.add_message(
@@ -322,7 +465,7 @@ class Agent:
         # 数据上下文仅在有日志时注入。
         uid = getattr(session, "user_id", 0)
         source_components = await _load_source_components(uid)
-        system_prompt = build_system_prompt(
+        system_prompt = _resolve_system_prompt(
             dataset.summary if dataset is not None else None, source_components
         )
         ctx = ConversationContext(
@@ -360,11 +503,16 @@ class Agent:
         # ---- 5. ReAct 循环 ----
         final_reply = ""
         totals = {"input": 0, "output": 0, "total": 0}  # 整轮 token 累计
+        # 同一 (工具,参数) 无效调用计数，用于检测对工具的死循环调用
+        unproductive_calls: dict[str, int] = {}
 
         for iteration in range(self.max_iterations):
             session = self.session_manager.get(session_id)
             if not session:
                 raise ValueError(f"Session lost during run: {session_id}")
+
+            # 最后一轮：禁用工具 + 注入收尾指令，强制 LLM 用已有信息直接作答
+            is_last = iteration == self.max_iterations - 1
 
             if iteration == 0:
                 messages = ctx.build_messages(
@@ -374,6 +522,10 @@ class Agent:
             else:
                 messages = [{"role": "system", "content": system_prompt}]
                 messages.extend(session.messages)
+            if is_last and exposed_groups:
+                messages.append(
+                    {"role": "system", "content": _FINAL_STEP_DIRECTIVE}
+                )
 
             logger.debug(
                 "ReAct iteration %d [stream]: %d messages",
@@ -394,7 +546,9 @@ class Agent:
                 tool_calls = None
                 finish_reason = "stop"
 
-                async for evt in self.llm.chat_stream(messages, tool_schemas):
+                # 最后一轮不暴露工具，逼模型产出文本而非又一轮 tool_calls。
+                offered_tools = [] if is_last else tool_schemas
+                async for evt in self.llm.chat_stream(messages, offered_tools):
                     if evt["type"] == "content_delta":
                         # 文本增量立即转发给前端
                         yield {"type": "delta", "text": evt["text"]}
@@ -417,8 +571,8 @@ class Agent:
                 # 与 run() 保持一致：按 tool_calls 是否存在判断，而非依赖
                 # finish_reason（某些 OpenAI 兼容服务在有 tool_calls 时
                 # 仍返回非 "tool_calls" 的 finish_reason，依赖它会导致工具永不执行）。
-                # 无数据集时不执行工具（此时未向 LLM 暴露任何工具）。
-                if tool_calls and exposed_groups:
+                # 无数据集 / 最后一轮不执行工具。
+                if tool_calls and exposed_groups and not is_last:
                     self.session_manager.add_message(
                         session_id,
                         {
@@ -462,6 +616,11 @@ class Agent:
                             tool_span.update(
                                 output={"result": result_str[:2000]},
                             )
+
+                        # 同一调用反复无效时，给结果追加换策略提示
+                        result_str = _note_tool_result(
+                            unproductive_calls, func_name, func_args, result_str
+                        )
 
                         # 将工具结果加入会话
                         self.session_manager.add_message(

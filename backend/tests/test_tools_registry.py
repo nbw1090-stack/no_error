@@ -12,16 +12,15 @@ REGISTERED_TOOLS = {
     "filter_by_component",
     "filter_by_level",
     "get_summary",
-    "get_component_stats",
     "get_time_range",
     "get_errors_by_component",
-    "get_error_timeline",
+    "get_error_digest",
     "get_context_around",
 }
 
 
 def test_registered_at_import():
-    # 导入 agent.tools 即注册 9 个工具
+    # 导入 agent.tools 即注册 8 个日志工具
     assert REGISTERED_TOOLS.issubset(set(ToolRegistry.get_names()))
 
 
@@ -61,5 +60,5 @@ async def test_execute_tool_exception_returns_error_str(sample_dataset, monkeypa
 async def test_execute_success_returns_json(sample_dataset):
     result = await ToolRegistry.execute("get_summary", {}, sample_dataset)
     data = json.loads(result)
-    assert data["totalLines"] == 6
-    assert data["errorCount"] == 2
+    assert data["total_lines"] == 6
+    assert data["errors"] == 2

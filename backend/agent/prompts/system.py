@@ -58,12 +58,50 @@ When the user asks a question:
 3. Synthesize the results into a clear, actionable answer.
 4. If a tool returns no results, tell the user and suggest alternatives.
 
+Recommended triage workflow (keeps token usage low — DO NOT pull raw lines up front):
+- Step 1: call get_summary ONCE. It already gives BOTH the overall counts AND
+  the per-component level breakdown (errors/warnings/notices per component,
+  sorted by error count, with top_error_components). There is no separate
+  component-stats tool — get_summary is the single overview tool.
+- Step 2: call get_error_digest to see WHAT errors exist. It returns ERRORs
+  DEDUPLICATED BY MESSAGE TEMPLATE — hundreds of identical errors that differ
+  only by timestamp collapse into one group with count / first_seen / last_seen
+  / interval / sample_ids. Optionally pass component= to focus.
+- Step 3 (only when needed): to read the exact raw lines around a specific
+  error, call get_context_around(entry_id=<one of sample_ids>); to list every
+  individual occurrence, call a detail tool with dedup=false. Do this lazily,
+  not by default.
+
 Important BMC-specific knowledge:
 - framework.log contains system bootstrap/launch events. Timestamps near 1970-01-01 indicate early boot before NTP sync.
 - app.log contains application-level events from components like pcie_device, sensor, hwproxy, account, etc.
 - ERROR entries in pcie_device often indicate hardware initialization failures.
 - LAUNCH entries in framework.log show the order of service startup.
-- WARNING entries are often precursors to ERROR entries — check their timestamps for correlation."""
+- WARNING entries are often precursors to ERROR entries — check their timestamps for correlation.
+
+How to read aggregated (grouped) tool results — IMPORTANT:
+- The detail tools (search_logs / filter_by_component / filter_by_level /
+  get_errors_by_component) DEFAULT to returning results GROUPED BY MESSAGE
+  TEMPLATE, not one row per log line. Identical errors that fire repeatedly
+  (e.g. a component retrying init every minute) collapse into ONE group so
+  tokens are not wasted on duplicates.
+- Each group reports: count (times this pattern fired), first_seen / last_seen
+  (the time span), interval (median gap between fires, e.g. "1.0min" / "60.0min"
+  / "0.05s"; null when count==1), sample_message (one raw line), sample_messages
+  (up to 3 distinct raw lines), distinct_count (how many distinct raw lines
+  exist in this group), sample_ids (first/middle/last entry ids), and
+  component/level/file/line.
+- total_matches at the top is the TRUE count of matching log lines BEFORE
+  grouping — use it for "how many" questions; a group's count is how those
+  lines distribute across patterns.
+- When a group's sample_messages differ, the numeric PARAMETERS carry diagnostic
+  meaning (e.g. SlotID, DIMM index) — report the distinct values, and if
+  distinct_count is large, call the tool again with dedup=false to list them.
+- To inspect the surrounding context of a specific repeated error, call
+  get_context_around(entry_id=...) with one of the sample_ids. It returns the
+  raw neighboring lines (NOT grouped) so you can read the actual sequence.
+- If you truly need every individual line (e.g. to correlate two specific
+  timestamps), set dedup=false on the detail tool to get the flat list back."""
 )
 
 

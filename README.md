@@ -106,6 +106,64 @@ LANGFUSE_BASE_URL="http://localhost:3001"
 
 重启后端后，每次对话的 trace 会出现在 Langfuse 控制台。后端在每个请求结束时调用 `tracer.flush()` 立即上报。
 
+### 4. Langfuse 进阶：Prompt / Scores / Datasets 管理
+
+在「3」开启基础 trace 之后，还可启用 Langfuse 的三大管理能力。它们**全部默认降级**：未配置 / 拉取失败时自动回退本地逻辑，绝不阻断对话。下面命令都需先 `cd backend && source venv/bin/activate`。
+
+#### Scores —— 用户点赞 / 踩
+
+每轮 AI 回复下方有 👍/👎 按钮。点击后，后端把反馈作为 `user_feedback`（CATEGORICAL: `like` / `dislike`）score 打到**对应那条 trace** —— 每轮对话生成的 `trace_id` 会随响应 / SSE `done` 事件回传前端并挂到该条消息上；幂等键 `trace_id-user_feedback` 让"先赞后踩"覆盖而非堆叠。
+
+- **验证**：聊天 → 点赞 → 在 Langfuse 该 trace 的 Scores 看到 `user_feedback=like`；再点踩 → 同一 trace 的 score 变为 `dislike`。
+- **接口**：`POST /api/feedback`，body `{ trace_id, session_id, feedback: "like"|"dislike", comment? }`（需登录；`trace_id` 必须属于当前用户的会话，否则 404）。
+
+#### Prompt Management —— 在线改 system prompt，不发版
+
+「数据分析模式」（已上传日志）的 system prompt 托管在 Langfuse（prompt 名 `bmc-system`，默认取 `production` 标签）。改 prompt 无需重新部署；拉取失败自动回退本地 `build_system_prompt`。
+
+**方式 A：一键上传初始版本（推荐）**
+
+```bash
+python -m eval.seed_prompt
+```
+
+脚本把内置的数据分析模式模板（`{{var}}` 双花括号）上传为 `bmc-system` 的初始版本并打 `production` 标签。之后在 Langfuse UI 编辑该 prompt 即可热更新。
+
+**方式 B：在 Langfuse UI 手动创建**
+
+Prompts → New Prompt，text 类型：
+- **Name**：`bmc-system`（或你在 `LANGFUSE_PROMPT_NAME` 设的值）
+- **模板**用 `{{var}}` 双花括号变量，可用变量见 `backend/agent/core.py` 的 `_prompt_vars`：`{{total_lines}}` `{{error_count}}` `{{warning_count}}` `{{notice_count}}` `{{launch_count}}` `{{component_count}}` `{{components}}` `{{time_start}}` `{{time_end}}` `{{indexed_components}}`
+- 给当前版本打 `production` 标签。
+
+**验证 / 回退**：在 Langfuse 改一句 prompt → 开新一轮对话确认用上新版（trace 关联的 prompt version 更新）；删掉该 prompt 或取消 `production` 标签 → 确认对话自动回退本地版本、不中断。
+
+> 仅「数据分析模式」走 Langfuse 托管；无日志的纯问答 / 源码问答模式仍用本地 prompt。
+
+#### Datasets —— 回归评测（黄金集 + 一键回放）
+
+攒一批 `(问题 → 期望根因)` 黄金集，改 prompt / 换模型后一键回放对比分数。
+
+**1. 准备本地数据集**：先在前端上传一份 `dump_info.tar.gz`，记下 `dataset_id`（如 `d5ff544231bf`，对应 `backend/data/datasets/<id>.json`）。
+
+**2. 在 Langfuse 建 dataset**：UI → Datasets → New Dataset（如 `bmc-diagnosis-golden`），为每个 case 加一个 item：
+- `input` = `{ "question": "<要问 agent 的问题>", "dataset_id": "<上一步的本地 dataset_id>" }`
+- `expected_output` = `<期望命中的根因关键词>`（用于确定性打分）
+
+（也可从已有高质量 trace 一键「Add to dataset」收集。）
+
+**3. 跑评测**：
+
+```bash
+python -m eval.run_eval --dataset bmc-diagnosis-golden --run-name prompt-v2
+```
+
+脚本会：拉取 dataset items → 逐条跑 ReAct agent → 用 `diagnosis_acc`（期望关键词是否命中）打分 → 把分数上报回 Langfuse。
+
+**4. 对比**：在 Langfuse Datasets → Runs 并排看不同 run 的分数。改 prompt 前后各跑一次即可回归。
+
+> 脚本是骨架：dataset item 的 `input` / `expected_output` schema 与 evaluator 逻辑（`backend/eval/run_eval.py`）都可按实际回归需求改。
+
 ## 配置说明
 
 所有配置通过环境变量注入，`backend/.env`（gitignored）为本地默认来源。优先级：**环境变量 > `.env` > 默认值**。加载由 `backend/config.py` 内的手写 loader 完成（无 `python-dotenv` 依赖）。
@@ -130,6 +188,8 @@ LANGFUSE_ENABLED=false
 LANGFUSE_PUBLIC_KEY=
 LANGFUSE_SECRET_KEY=
 LANGFUSE_BASE_URL=https://cloud.langfuse.com
+LANGFUSE_PROMPT_NAME=bmc-system      # 托管「数据分析模式」system prompt 的 prompt 名
+LANGFUSE_PROMPT_LABEL=production     # 拉取的标签（拉取失败自动回退本地 prompt）
 ```
 
 > **降级行为：** 若 `LLM_API_KEY` 未配置，后端启动时 `llm` / `agent` 为 `None`，`/api/chat*` 自动回退到规则匹配回复（`_generate_reply`），系统仍可正常解析日志、展示仪表盘。若 `LANGFUSE_ENABLED != true`，追踪全部降级为空操作。
@@ -155,6 +215,7 @@ no_error/
 │   ├── auth/                     # 用户认证（注册/登录/令牌，SQLite，前缀 /api/auth）
 │   ├── ast_analysis/             # tree-sitter 源码 AST 分析（前缀 /api/ast）
 │   ├── observability/            # Langfuse v4 追踪（OTEL 自动嵌套）
+│   ├── eval/                     # Langfuse 评测脚本（run_eval 回归 / seed_prompt 上传初始 prompt）
 │   └── data/                     # 运行时数据（datasets/sessions JSON + *.db + source 快照）
 │
 ├── frontend/
@@ -193,6 +254,7 @@ no_error/
 |------|------|------|
 | `POST` | `/api/chat` | ReAct Agent 对话（同步返回最终回复；LLM 不可用时降级规则匹配） |
 | `POST` | `/api/chat/stream` | Agent 对话（**SSE**：实时推送工具调用进度 + 逐词回复，可用 AbortSignal 中断） |
+| `POST` | `/api/feedback` | 对一轮回复点赞 / 踩，打 Langfuse `user_feedback` score（按 `trace_id` 关联） |
 
 请求体：`{ "message": "...", "session_id": "..." }`。会话 `dataset_id` 为空时进入**纯对话模式**（通用 BMC 问答，不暴露任何工具）。
 
@@ -275,7 +337,7 @@ no_error/
 - 👤 **用户认证与隔离** — 数据集 / 会话 / 组件 / 源码索引全部按用户隔离，互不可见
 - 🧱 **组件注册表** — 管理待分析的组件源码仓库（SQLite）
 - 🌲 **AST 源码分析** — tree-sitter 解析 C / C++ / Lua，按行号反查符号
-- 📈 **Langfuse 可观测性** — 自动嵌套的 trace，洞察每次 LLM 调用与工具执行
+- 📈 **Langfuse 可观测性与评测** — 自动嵌套 trace；支持在线 Prompt 管理、用户点赞/踩打分（Scores）、黄金集回归评测（Datasets）
 - 🌙 **WattVision 深色主题**
 
 ## 设计规范

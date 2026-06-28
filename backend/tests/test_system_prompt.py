@@ -87,3 +87,14 @@ def test_source_components_backward_compat_strings():
     assert "INDEXED SOURCE CODE" in prompt
     assert "sensor" in prompt
     assert "pcie_device" in prompt
+
+
+def test_tool_guidance_documents_aggregation():
+    """数据分析模式注入聚合分组返回结构的引导。"""
+    prompt = build_system_prompt(_SUMMARY)
+    assert "GROUPED BY MESSAGE" in prompt  # 分组聚合说明
+    assert "collapse into ONE group" in prompt  # 重复错误合并为一组
+    assert "sample_ids" in prompt
+    assert "interval" in prompt
+    assert "dedup=false" in prompt
+    assert "get_context_around" in prompt  # 下钻引导

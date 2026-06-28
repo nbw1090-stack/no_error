@@ -5,6 +5,12 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
+    // 远程访问部署：放开监听地址，让 cloudflared 隧道能从本机回源 localhost:5173
+    // （否则 vite 默认只监听 [::1]，IPv4 回源连不上）。
+    host: true,
+    // 允许穿透域名（app.<域名>）访问：vite 6 默认 allowedHosts:[] 会以 403
+    // 拒绝非 localhost 的 Host 头。开发演示场景放开全部。
+    allowedHosts: true,
     port: 5173,
     proxy: {
       '/api': {

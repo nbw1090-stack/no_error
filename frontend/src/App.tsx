@@ -78,6 +78,9 @@ export default function App() {
   // ---- 请求序列号（处理快速切换会话时的竞态） ----
   const selectRequestSeq = useRef(0);
 
+  // ---- init 防重入：React StrictMode 开发模式会双触发首屏 effect ----
+  const initRanRef = useRef(false);
+
   // ---- 上传解析流式状态 ----
   // parseStream !== null 即代表流式进行中（progress 阶段）；summary 到达后置 null。
   const [parseStream, setParseStream] = useState<UploadStreamState | null>(null);
@@ -163,44 +166,23 @@ export default function App() {
   }
 
   /**
-   * 创建一个空数据集会话（纯对话）并设为活跃。
+   * ChatPanel 懒创建会话后的回填：激活该会话 + 加入侧栏 + 持久化 localStorage。
    *
-   * 用于「新会话」按钮与首次落地（无可恢复会话时）：使新会话页立即显示
-   * 「上传区 + 对话窗口」，用户可不上传直接提问。返回新建的 session_id。
+   * 落地 / 新会话空白态下不再预先在后端建会话，用户首次发消息时由 ChatPanel
+   * 创建，再经此回调把新会话同步进 App 状态（避免每次落地堆积空会话）。
    */
-  async function startBlankSession(): Promise<string | null> {
-    try {
-      const session = await createSession(null);
-      setActiveSessionId(session.session_id);
-      setActiveDatasetId(null);
-      setSummary(null);
-      setPreloadedMessages([]); // 新会话无历史消息
-      setError(null);
-      localStorage.setItem(SESSION_STORAGE_KEY, session.session_id);
-
-      const newSessionInfo: SessionInfo = {
-        session_id: session.session_id,
-        dataset_id: session.dataset_id,
-        created_at: session.created_at,
-        updated_at: session.created_at,
-        message_count: 0,
-        title: '',
-      };
-      // 去重后置顶（避免重复点击「新会话」造成列表重复）
-      setSessions((prev) => [
-        newSessionInfo,
-        ...prev.filter((s) => s.session_id !== session.session_id),
-      ]);
-      return session.session_id;
-    } catch (e) {
-      console.error('Failed to create blank session:', e);
-      setError('创建会话失败，请重试。');
-      return null;
-    }
+  function handleSessionCreated(session: SessionInfo) {
+    setActiveSessionId(session.session_id);
+    localStorage.setItem(SESSION_STORAGE_KEY, session.session_id);
+    // 去重后置顶（避免重复回调造成列表重复）
+    setSessions((prev) => [
+      session,
+      ...prev.filter((s) => s.session_id !== session.session_id),
+    ]);
   }
 
-  /** 开始新会话：清空右侧 → 创建空数据集会话 → 显示「上传 + 对话」 */
-  async function handleNewSession() {
+  /** 开始新会话：清空右侧 → 进入空白态（不立即建会话），首条消息时再懒创建。 */
+  function handleNewSession() {
     parseAbortRef.current?.abort();
     setParseStream(null);
     setSummary(null);
@@ -208,9 +190,9 @@ export default function App() {
     setActiveSessionId(null);
     setError(null);
     setFilters({ component: '', level: 'ALL', search: '' });
-    setPreloadedMessages(undefined);
+    // 空白态：直接显示「上传 + 对话」，用户首次发消息时再由 ChatPanel 懒创建。
+    setPreloadedMessages([]);
     localStorage.removeItem(SESSION_STORAGE_KEY);
-    await startBlankSession();
   }
 
   /**
@@ -234,7 +216,9 @@ export default function App() {
       setActiveDatasetId(null);
       setSummary(null);
       setError(null);
-      setPreloadedMessages(undefined);
+      // 进入空白态（[] 而非 undefined）：让 ChatPanel 立即可输入、首条消息懒创建，
+      // 而不是卡在「恢复中」等待态。undefined 会被 ChatPanel 当作"加载中"无限等待。
+      setPreloadedMessages([]);
       localStorage.removeItem(SESSION_STORAGE_KEY);
     }
 
@@ -429,6 +413,10 @@ export default function App() {
    */
   useEffect(() => {
     async function init() {
+      // 防重入：React StrictMode 开发模式会双触发首屏 effect，避免重复加载。
+      if (initRanRef.current) return;
+      initRanRef.current = true;
+
       // 1. 并行请求：健康检查 + 会话列表（互不依赖）
       const [health] = await Promise.all([
         checkHealth(),
@@ -460,9 +448,12 @@ export default function App() {
         }
       }
 
-      // 3. 无可恢复会话：创建空数据集会话，使落地页即显示「上传 + 对话」
+      // 3. 无可恢复会话：进入空白态（不立即在后端建会话）。
+      //    落地页照常显示「上传 + 对话」，首次发消息时由 ChatPanel 懒创建，
+      //    避免每次刷新都堆积空会话（也曾因 StrictMode 双触发一次建多个）。
       if (!restored) {
-        await startBlankSession();
+        setActiveSessionId(null);
+        setPreloadedMessages([]);
       }
 
       setSessionRestored(true);
@@ -617,14 +608,17 @@ export default function App() {
               </>
             )}
 
-            {/* Agent 对话窗口：纯对话会话时位于上传区下方；有数据集时位于仪表盘下方 */}
-            {activeSessionId && sessionRestored && (
-              <div className="chat-section" key="chat-panel">
+            {/* Agent 对话窗口：纯对话会话时位于上传区下方；有数据集时位于仪表盘下方。
+                允许 activeSessionId=null（落地 / 新会话空白态）；此处不绑 key ——
+                懒创建后 sessionId 由 null → 新值，若绑 key 会重挂载并丢失进行中的流式消息。
+                切换会话的重置改由 ChatPanel 内部受控恢复 effect 承担。 */}
+            {sessionRestored && (
+              <div className="chat-section">
                 <ChatPanel
-                  key={activeSessionId}
                   sessionId={activeSessionId}
                   initialMessages={preloadedMessages}
                   hasDataset={!!activeDatasetId}
+                  onSessionCreated={handleSessionCreated}
                 />
               </div>
             )}

@@ -104,6 +104,53 @@ class ObservabilityClient:
             logger.warning("Langfuse observation '%s' failed: %s", name, e)
             yield _NoopObservation()
 
+    def score(
+        self,
+        *,
+        trace_id: str,
+        name: str,
+        value,
+        comment: str | None = None,
+        data_type: str | None = None,
+        score_id: str | None = None,
+    ):
+        """
+        给一条 trace 打 Langfuse score（数值 / 类别 / 布尔 / 文本）。
+
+        用于「用户点赞/踩」「自定义指标」「LLM 判官」等评测信号的回灌。
+        enabled=False 时静默 no-op，绝不在未启用环境抛错。
+        score_id 用作幂等键：同一 trace 同一 name 再次打分会覆盖而非堆叠
+        （如同一轮对话先赞后踩，最终只留一个 score）。
+        """
+        if not self.enabled:
+            return
+        try:
+            kwargs = dict(trace_id=trace_id, name=name, value=value)
+            if comment is not None:
+                kwargs["comment"] = comment
+            if data_type is not None:
+                kwargs["data_type"] = data_type
+            if score_id is not None:
+                kwargs["score_id"] = score_id
+            self._langfuse.create_score(**kwargs)
+        except Exception as e:
+            logger.warning("Langfuse score '%s' failed: %s", name, e)
+
+    def get_prompt(self, name: str, label: str = "production"):
+        """
+        从 Langfuse Prompt Management 拉取一个 prompt（默认 production 标签）。
+
+        enabled=False / 拉取失败 / 网络异常时返回 None，由调用方回退到本地逻辑。
+        返回的 prompt 对象调 .compile(**vars) 填充模板变量（Langfuse 用 {{var}} 语法）。
+        """
+        if not self.enabled:
+            return None
+        try:
+            return self._langfuse.get_prompt(name, label=label)
+        except Exception as e:
+            logger.warning("Langfuse get_prompt '%s' failed: %s", name, e)
+            return None
+
     def flush(self):
         if self.enabled:
             try:
