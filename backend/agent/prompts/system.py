@@ -106,6 +106,28 @@ How to read aggregated (grouped) tool results — IMPORTANT:
 
 
 # ============================================================
+# 模块 3.5：停止准则（显式定义"什么是 done"，抑制工具死循环 / 过度探索）
+# ============================================================
+STOP_CRITERIA_PROMPT = PromptTemplate(
+    """\
+When to STOP calling tools and answer directly — this is a HARD rule, not a
+suggestion. As soon as ANY of these holds, stop calling tools and write your
+final answer from what you already have:
+- You have enough evidence to answer the user's question (a root-cause chain,
+  the relevant counts/timestamps, or a well-grounded inference).
+- Your last 1-2 tool calls returned nothing new (empty, an error, or the same
+  data you already saw). Do NOT retry the same tool with the same arguments —
+  change strategy or conclude.
+- You already called the same tool with the same arguments before. Repeating an
+  identical call is forbidden; it will be blocked.
+
+Never keep calling tools just to be "more thorough". A focused answer that names
+the remaining unknowns is better than burning the iteration budget. If the data
+is genuinely insufficient, say so explicitly and state what is missing."""
+)
+
+
+# ============================================================
 # 模块 4：源码检索指导（动态注入，仅当用户已索引源码时启用）
 # ============================================================
 SOURCE_GUIDANCE_PROMPT = PromptTemplate(
@@ -135,9 +157,78 @@ Choose the first tool by question type:
 5. Only as a last resort to browse raw structure → list_source_files(component)
    (returns the full file list and can be very large).
 
-After gathering evidence, synthesize your answer citing specific file:line. If a
-lookup reports the component is NOT indexed, tell the user to build the AST source
-index in the component management page first."""
+FOLLOW THE CHAIN — do NOT conclude from the first function body alone. The true
+root cause usually lives one hop deeper than the line that logged the error:
+- To go deeper than ONE hop, call trace_call_chain FIRST (anchored by name or
+  file+line). It returns a cheap NAVIGATION skeleton — function names + file:line
+  + the single calling line per hop, NO bodies — so you see the whole chain at a
+  glance. Read the skeleton, pick the ONE suspicious hop, then call
+  gather_code_context for that one body. Do NOT call gather_code_context
+  repeatedly to walk the chain blindly — that bloats context with full bodies.
+- If the failing line calls another function/method, looks up a table/map, or
+  checks a value produced elsewhere (e.g. get_device → get_port_id, a *_map
+  lookup that returns nil, a proxy / mdb GetObject), trace_call_chain surfaces
+  that callee; gather only the body you actually need BEFORE you conclude. The
+  logged line tells you WHERE it failed; the called code tells you WHY.
+- Cross-component / cross-service symptom (the failing component reads data that
+  another component or service should provide over an mdb/dbus interface such as
+  bmc.dev.* / bmc.kepler.*): take the interface from trace_call_chain's
+  interfaces_seen and call resolve_interface(name) ONCE to locate the provider
+  component. Pin the failing call to its real file:line in the INDEXED component,
+  name the interface, and identify WHICH side is the actual root cause — usually
+  the provider that never supplied the object / property. When provider_indexed
+  is false, name the provider from the wiki_hint; say this explicitly even though
+  that provider is not itself indexed, and never invent its code.
+
+GROUND EVERY CLAIM IN THE CODE YOU RETRIEVED. Once you have enough evidence,
+structure the answer as:
+- 根因：tie it to the actual function body you retrieved, citing the specific
+  file:line where the failure originates.
+- 证据：quote the REAL identifiers from that code — the function / variable /
+  constant names, the exact failing condition, and the returned error code
+  (the actual enum / RET value as written). Do NOT paraphrase these into generic
+  words; reuse the names verbatim as they appear in the source.
+- 修复方向：a concrete next step grounded in that code; for a cross-component
+  issue name both the 主修 (provider) side and the 调用侧 fault-tolerance.
+
+Never assert a conclusion the retrieved code does not support — if the body you
+got does not explain the error, gather more before answering. If a lookup reports
+the component is NOT indexed, tell the user to build the AST source index in the
+component management page first, and never fabricate a function body."""
+)
+
+
+# ============================================================
+# 模块 4.5：Wiki 知识库检索指导（动态注入，仅当全局 wiki 已建索引时启用）
+# ============================================================
+WIKI_GUIDANCE_PROMPT = PromptTemplate(
+    """\
+You also have access to the openUBMC WIKI — a curated knowledge base that an LLM
+distilled from the official openUBMC documentation into structured, interlinked
+pages (overall architecture, the component/module model, the mdb & D-Bus &
+Redfish interfaces, key feature designs). Treat it as AUTHORITATIVE background on
+how the system is designed.
+
+How to use the wiki — navigate it like a wiki, do NOT answer architecture/design
+questions from general knowledge:
+1. Call get_wiki_index FIRST. It returns the architecture overview plus a grouped
+   table of contents (each page's slug + title + one-line description). Use it to
+   decide which page(s) to read.
+2. Call read_wiki_page(slug) to read the full distilled page for the topic you
+   need. Pages interlink to each other — follow links to related slugs as needed.
+3. Only if the index does not make the right page obvious, fall back to
+   search_wiki(query) to keyword-search the compiled pages, then read_wiki_page.
+
+When to consult the wiki:
+- The user asks about openUBMC/BMC architecture, a component's design intent, or
+  an interface/protocol/spec (mdb, D-Bus, Redfish, the model rules).
+- A log error or a piece of indexed source code needs to be mapped to the
+  documented design to explain the root cause or expected behavior.
+
+Combine sources: ground concrete findings in the LOGS and the INDEXED SOURCE CODE,
+and use the WIKI to explain the architecture/design behind them. Cite the wiki
+page (its title or slug) when you rely on it. Never invent documentation content —
+if the wiki has no relevant page, say so plainly."""
 )
 
 
@@ -222,6 +313,7 @@ def _format_indexed_components(source_components):
 def build_system_prompt(
     summary: Optional[dict] = None,
     source_components: list[dict] | list[str] | None = None,
+    wiki_available: bool = False,
 ) -> str:
     """
     组合所有提示词模块，生成完整的系统提示词。
@@ -230,26 +322,32 @@ def build_system_prompt(
         summary: parser.parse_logs() 返回的 summary 字典
         source_components: 用户已构建源码索引的组件名列表；非空时追加源码
             检索指导段，引导 LLM 在代码问题上主动调用源码工具。
+        wiki_available: 全局 wiki 知识库是否已建索引；为 True 时追加 wiki 检索
+            指导段，引导 LLM 在架构/设计/接口类问题上主动调用 search_wiki。
 
     Returns:
         完整的系统提示词字符串
     """
     # 无数据集：
     # - 有已索引源码组件 → 「无日志但有源码」模式（源码工具可用，可基于源码问答）
-    # - 否则 → 纯通用问答（无任何工具）
+    # - 否则 → 纯通用问答（无日志/源码工具；若 wiki 可用则有 wiki 工具）
     if summary is None:
         if source_components:
-            return "\n\n".join(
-                [
-                    QA_SOURCE_ROLE_PROMPT.render(),
-                    SOURCE_GUIDANCE_PROMPT.render(
-                        indexed_components=_format_indexed_components(
-                            source_components
-                        )
-                    ),
-                ]
-            )
-        return "\n\n".join([QA_ROLE_PROMPT.render(), QA_GUIDANCE_PROMPT.render()])
+            parts = [
+                QA_SOURCE_ROLE_PROMPT.render(),
+                SOURCE_GUIDANCE_PROMPT.render(
+                    indexed_components=_format_indexed_components(
+                        source_components
+                    )
+                ),
+            ]
+        else:
+            parts = [QA_ROLE_PROMPT.render(), QA_GUIDANCE_PROMPT.render()]
+        if wiki_available:
+            parts.append(WIKI_GUIDANCE_PROMPT.render())
+        if source_components:
+            parts.append(STOP_CRITERIA_PROMPT.render())
+        return "\n\n".join(parts)
 
     components = summary.get("components", [])
     time_range = summary.get("timeRange", {})
@@ -268,6 +366,7 @@ def build_system_prompt(
             time_end=time_range.get("end", "unknown"),
         ),
         TOOL_GUIDANCE_PROMPT.render(),
+        STOP_CRITERIA_PROMPT.render(),
     ]
 
     if source_components:
@@ -276,5 +375,8 @@ def build_system_prompt(
                 indexed_components=_format_indexed_components(source_components)
             )
         )
+
+    if wiki_available:
+        parts.append(WIKI_GUIDANCE_PROMPT.render())
 
     return "\n\n".join(parts)

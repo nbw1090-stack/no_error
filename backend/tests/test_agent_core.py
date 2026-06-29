@@ -5,7 +5,7 @@ import json
 import pytest
 
 import agent.tools  # noqa: F401
-from agent.core import Agent
+from agent.core import Agent, LoopGuard
 from agent.session import SessionManager
 from agent.tools.registry import ToolRegistry
 
@@ -164,6 +164,121 @@ async def test_react_distinct_calls_not_warned(tmp_path, sample_dataset, tc):
         m for m in sm.get(session.session_id).messages if m["role"] == "tool"
     ]
     assert all("调用策略提示" not in m["content"] for m in tool_msgs)
+
+
+# ============================================================
+# LoopGuard：死循环硬熔断（单元）
+# ============================================================
+
+def test_loopguard_blocks_exact_duplicate_after_limit():
+    g = LoopGuard(repeat_limit=2)
+    assert g.inspect("get_summary", {}) is None  # 1
+    assert g.inspect("get_summary", {}) is None  # 2
+    blocked = g.inspect("get_summary", {})        # 3 → 拦截
+    assert blocked is not None
+    assert json.loads(blocked)["error"] == "duplicate_call_blocked"
+    assert g.interceptions == 1
+
+
+def test_loopguard_detects_oscillation_before_duplicate():
+    # A-B-A-B：第 4 次（B 的第 2 次）触发振荡，早于任一签名达到重复上限
+    g = LoopGuard(repeat_limit=2, oscillation_window=4, oscillation_distinct=2)
+    assert g.inspect("search_logs", {"q": "a"}) is None  # A1
+    assert g.inspect("search_logs", {"q": "b"}) is None  # B1
+    assert g.inspect("search_logs", {"q": "a"}) is None  # A2
+    blocked = g.inspect("search_logs", {"q": "b"})       # B2 → 振荡
+    assert blocked is not None
+    assert json.loads(blocked)["error"] == "oscillation_detected"
+
+
+def test_loopguard_should_finalize_after_hard_stop():
+    g = LoopGuard(repeat_limit=1, hard_stop_after=2)
+    g.inspect("t", {})                 # 1 pass
+    assert g.inspect("t", {}) is not None  # 2 blocked (interceptions=1)
+    assert not g.should_finalize
+    assert g.inspect("t", {}) is not None  # 3 blocked (interceptions=2)
+    assert g.should_finalize
+
+
+# ============================================================
+# LoopGuard 集成：死循环被熔断 + 提前收尾
+# ============================================================
+
+async def test_react_duplicate_tool_call_blocked_not_executed(
+    tmp_path, sample_dataset, tc
+):
+    # 第 3 次完全相同调用应被熔断：返回 duplicate_call_blocked，不再真正执行
+    agent, sm, session = _new_agent(
+        tmp_path,
+        [
+            [tc("get_summary", {}, "c1")],
+            [tc("get_summary", {}, "c2")],
+            [tc("get_summary", {}, "c3")],
+            "done",
+        ],
+    )
+    reply = await agent.run(session.session_id, "loop", sample_dataset)
+    assert reply == "done"
+    tool_msgs = [
+        m for m in sm.get(session.session_id).messages if m["role"] == "tool"
+    ]
+    # 前两次正常执行（真实 get_summary 概览），第三次被拦截
+    assert "duplicate_call_blocked" not in tool_msgs[0]["content"]
+    assert "duplicate_call_blocked" not in tool_msgs[1]["content"]
+    assert json.loads(tool_msgs[2]["content"])["error"] == "duplicate_call_blocked"
+
+
+async def test_react_loop_triggers_early_finalize(tmp_path, sample_dataset, tc):
+    # 持续重复同一调用 → 累计拦截达阈值 → 提前进入禁工具收尾轮强制作答，
+    # 不空耗到 max_iterations（默认 10），最终 LLM 调用不带工具。
+    agent, _, session = _new_agent(
+        tmp_path,
+        [[tc("get_summary", {})]] * 5 + ["最终结论"],
+        max_iterations=10,
+    )
+    reply = await agent.run(session.session_id, "loop", sample_dataset)
+    assert reply == "最终结论"
+    # 提前收尾：远未用满 10 轮（5 个工具轮 + 1 个收尾轮 = 6 次 LLM 调用）
+    assert len(agent.llm.calls) == 6
+    assert agent.llm.calls[-1]["tools"] == []  # 收尾轮禁工具
+
+
+async def test_react_soft_landing_injects_convergence_hint(
+    tmp_path, sample_dataset, tc
+):
+    # 临近迭代上限（剩余 ≤ 软着陆窗口）应注入收敛提示
+    agent, _, session = _new_agent(
+        tmp_path,
+        [[tc("get_summary", {}, "c1")], [tc("get_summary", {}, "c2")], "done"],
+        max_iterations=4,
+    )
+    await agent.run(session.session_id, "q", sample_dataset)
+    # iteration1 剩余 3 轮 → 该轮消息含收敛提示
+    assert any(
+        any(
+            m["role"] == "system" and "开始收敛" in m["content"]
+            for m in call["messages"]
+        )
+        for call in agent.llm.calls
+    )
+
+
+async def test_stream_duplicate_tool_call_blocked(tmp_path, sample_dataset, tc):
+    # 流式路径与 run() 一致：第三次完全相同调用被熔断
+    agent, sm, session = _new_agent(
+        tmp_path,
+        [
+            [tc("get_summary", {}, "c1")],
+            [tc("get_summary", {}, "c2")],
+            [tc("get_summary", {}, "c3")],
+            "done",
+        ],
+    )
+    await _collect(agent, session.session_id, "loop", sample_dataset)
+    tool_msgs = [
+        m for m in sm.get(session.session_id).messages if m["role"] == "tool"
+    ]
+    assert json.loads(tool_msgs[2]["content"])["error"] == "duplicate_call_blocked"
 
 
 # ============================================================

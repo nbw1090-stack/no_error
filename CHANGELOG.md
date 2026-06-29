@@ -8,6 +8,28 @@
 
 ---
 
+## 0.0.1 — 2026-06-29
+
+接入 openUBMC **LLM Wiki**（Karpathy 模式）：让 LLM 把官方文档提炼成结构化、互链的
+markdown 知识库，agent 在日志分析 / 问答时按「索引页 → 整页」导航，结合 BMC 架构与源码作答。
+
+- 新增 `backend/wiki/` 模块（**全局共享**，不按用户隔离）。不再对原文切片做关键词检索，
+  而是 **LLM 逐篇提炼**：`compile` 规划「精选架构核心」源（design_reference / api /
+  quick_start / glossary）→ 每篇调一次 LLM 提炼成结构化页（概述/关键设计/接口/相关）→
+  互链 + LLM 写架构总览拼出 `index.md`。`store` 把结果落盘为 `index.md` +
+  `pages/<slug>.md` + `manifest.json`。
+- `service.sync_stream`：blobless+sparse 克隆 `docs/zh` → 有界并发提炼（按完成顺序推 SSE
+  进度）→ 写索引/manifest；**增量可续编**（source_hash 未变的页直接复用，不重复调 LLM）。
+- 新增 **wiki 工具组**：`get_wiki_index`（读索引）/ `read_wiki_page`（读整页）/
+  `search_wiki`（关键词检索兜底）。core 在 wiki 已编译时把 `wiki` 加入 `exposed_groups`
+  并注入 `WIKI_GUIDANCE_PROMPT`（引导「先读索引页、再读整页」），在「有日志」「无日志有源码」
+  「纯问答」三种模式下均可用（含 Langfuse 托管 prompt 路径）。
+- 新增 `/api/wiki/sync`（SSE 编译）/ `/status` / `/index` / `/page` / `/search` 端点
+  （全局共享、仍需登录，编译需配置 LLM）；前端加「Wiki 知识库」面板：编译按钮 + 逐页进度
+  + 已编译页清单（按主题分组）。
+- 测试：新增 21 条 wiki 用例（store / compile 流水线含假 LLM / 工具 / 端点，全离线），
+  更新工具分组用例；全套 322 通过。
+
 ## 0.0.0 — 2026-06-28
 
 首版基线：BMC 日志分析 ReAct agent + 评测评估框架。

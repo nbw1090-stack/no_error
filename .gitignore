@@ -25,6 +25,10 @@ backend/data/datasets/*.json
 backend/data/sessions/*.json
 backend/data/*.db
 backend/data/source/
+# 编译生成的 wiki 知识库（运行时产物，全局共享）——勿入库
+backend/data/wiki/
+# 临时/草稿目录——勿入库
+temp/
 # 运行时数据备份（如 _backup_YYYYMMDD_HHMMSS/），含 db/json，勿入库
 backend/data/_backup*/
 # 评测运行产物（每次 run 的逐条明细 + 记分卡）——过程记录，勿入库

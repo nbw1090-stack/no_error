@@ -142,7 +142,20 @@ def _run_offline(task, evaluators, cases_path: str, run_name: str, data_dir: str
                 "difficulty": meta.get("difficulty", ""),
             },
         ) as obs:
-            output = task(item=item)
+            # 单条 case 跑挂（API 4xx/超时等）不应崩掉整轮评测：捕获后记为空回复
+            # 继续，让其余 case 与记分卡照常产出。异常不得穿过 observation 上下文
+            # 管理器（穿过会触发 OTEL teardown 的二次异常 "generator didn't stop"）。
+            try:
+                output = task(item=item)
+            except Exception:  # noqa: BLE001 — 逐条隔离失败
+                logger.exception("[%d/%d] case 执行失败，记为空回复继续", i, len(cases))
+                output = {
+                    "reply": "",
+                    "trajectory": {
+                        "tool_calls": [], "tool_names": [], "tool_call_count": 0,
+                        "iterations": 0, "duplicate_calls": 0,
+                    },
+                }
             obs.update(output={"reply": (output.get("reply") or "")[:2000]})
 
         evals = []

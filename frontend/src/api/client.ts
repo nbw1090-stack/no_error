@@ -20,6 +20,7 @@ import type {
 import type { ComponentInfo } from '../types/component';
 import type { AuthResponse, AuthUser } from '../types/auth';
 import type { AstAnalyzeEvent, AstResult } from '../types/ast';
+import type { WikiStatus, WikiSyncEvent } from '../types/wiki';
 
 const API_BASE = '/api';
 
@@ -702,5 +703,56 @@ export async function* analyzeAstStream(
 
   for await (const event of readSSE(response)) {
     yield event as AstAnalyzeEvent;
+  }
+}
+
+// ============================================================
+// Wiki 知识库 API（全局共享的 openUBMC 文档检索库）
+// ============================================================
+
+/**
+ * 获取全局 wiki 知识库索引状态（来源/commit/页数/片段数/同步时间）。
+ * 未建索引时返回 { indexed: false, meta: null }。
+ */
+export async function getWikiStatus(): Promise<WikiStatus> {
+  const response = await fetch(`${API_BASE}/wiki/status`, {
+    headers: authHeaders(),
+  });
+
+  if (response.status === 401) onUnauthorized();
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    throw new Error(errorData?.detail || '获取 wiki 状态失败');
+  }
+
+  return response.json();
+}
+
+/**
+ * 触发 wiki 全量同步（SSE 流式）：从 openUBMC 文档站克隆 → 解析 → 重建索引。
+ *
+ * 复用 readSSE 解析 `data:` 行。事件联合见 WikiSyncEvent。结果是全局共享索引。
+ *
+ * @param signal 可选的 AbortSignal，用于停止按钮中断流。
+ * @yields       WikiSyncEvent。
+ */
+export async function* syncWikiStream(
+  signal?: AbortSignal,
+): AsyncGenerator<WikiSyncEvent> {
+  const response = await fetch(`${API_BASE}/wiki/sync`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({}),
+    signal,
+  });
+
+  if (response.status === 401) onUnauthorized();
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    throw new Error(errorData?.detail || `服务器错误: ${response.status}`);
+  }
+
+  for await (const event of readSSE(response)) {
+    yield event as WikiSyncEvent;
   }
 }

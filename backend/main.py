@@ -40,6 +40,7 @@ import db as component_db
 # 用户认证 + AST 分析（独立模块，各自管理自己的 SQLite DB 与 APIRouter）
 import auth
 import ast_analysis
+import wiki
 from ast_analysis import db as ast_db
 from auth.dependency import get_current_user
 
@@ -128,6 +129,15 @@ SOURCE_DIR = os.path.join(config.data_dir, "source")
 ast_analysis.set_source_dir(SOURCE_DIR)
 os.makedirs(SOURCE_DIR, exist_ok=True)
 
+# LLM Wiki 知识库（全局共享）：LLM 把 openUBMC 文档提炼成的 markdown 知识库目录
+wiki.set_wiki_dir(os.path.join(config.data_dir, "wiki"))
+try:
+    wiki.init_wiki_dir()
+except Exception as e:
+    logger.warning("Wiki dir init failed: %s. Wiki API may be unavailable.", e)
+# 注入 LLM adapter（编译 wiki 需要；未配置 LLM_API_KEY 时为 None，sync 时会报错提示）
+wiki.set_llm(llm)
+
 # ============================================================
 # 请求模型
 # ============================================================
@@ -178,9 +188,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 挂载认证 / AST 分析路由（各 router 自带 /api/auth、/api/ast 前缀）
+# 挂载认证 / AST 分析 / wiki 路由（各 router 自带 /api/auth、/api/ast、/api/wiki 前缀）
 app.include_router(auth.router)
 app.include_router(ast_analysis.router)
+app.include_router(wiki.router)
 
 # ============================================================
 # 辅助函数

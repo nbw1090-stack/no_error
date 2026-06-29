@@ -322,6 +322,7 @@ def tmp_data(tmp_path, monkeypatch):
     import db
     import auth
     import ast_analysis
+    import wiki
 
     datasets_dir = tmp_path / "datasets"
     sessions_dir = tmp_path / "sessions"
@@ -354,6 +355,11 @@ def tmp_data(tmp_path, monkeypatch):
     os.makedirs(source_dir, exist_ok=True)
     ast_analysis.set_source_dir(source_dir)
 
+    # LLM Wiki 目录（全局共享）同样重定向到 tmp_path，避免污染真实 backend/data/wiki
+    wiki_dir = str(tmp_path / "wiki")
+    wiki.set_wiki_dir(wiki_dir)
+    wiki.init_wiki_dir()
+
     return {
         "main": main,
         "datasets": datasets_dir,
@@ -362,6 +368,7 @@ def tmp_data(tmp_path, monkeypatch):
         "auth_db": auth_db_path,
         "ast_db": ast_db_path,
         "source_dir": source_dir,
+        "wiki_dir": wiki_dir,
     }
 
 

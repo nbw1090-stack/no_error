@@ -21,7 +21,11 @@ from agent.tools.registry import ToolRegistry
 from agent.context import ConversationContext
 from agent.dataset import LogDataset
 from agent.session import SessionManager
-from agent.prompts.system import build_system_prompt, _format_indexed_components
+from agent.prompts.system import (
+    build_system_prompt,
+    _format_indexed_components,
+    WIKI_GUIDANCE_PROMPT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +59,18 @@ _FINAL_STEP_DIRECTIVE = (
 
 # 同一 (工具, 参数) 重复返回无效信息的告警阈值：达到该次数即提示 LLM 换策略。
 _REPEAT_UNPRODUCTIVE_LIMIT = 2
+
+# 临近迭代预算（剩余轮数 ≤ 此值且尚未到最后一轮）时注入收敛提示，
+# 让模型主动收口而非被最后一轮硬切断。
+_SOFT_LANDING_WINDOW = 3
+
+
+def _convergence_directive(remaining: int) -> str:
+    """生成"预算软着陆"提示：告知剩余轮数并要求开始收敛。"""
+    return (
+        f"（你还剩 {remaining} 轮工具调用机会。请开始收敛：只做最关键的补充查询，"
+        "随后基于已掌握的信息给出结论，不要再做发散式探索。）"
+    )
 
 
 def _tool_signature(func_name: str, func_args: dict) -> str:
@@ -125,6 +141,87 @@ def _note_tool_result(
     return result_str
 
 
+class LoopGuard:
+    """
+    ReAct 单轮内的工具调用循环熔断器（Claude Code「No-Progress 检测」思路）。
+
+    在工具**执行前**登记每次调用,识别两类死循环并**硬拦截**(短路、不真正
+    执行工具,省 token 且打断循环):
+      1. 完全相同调用 —— 同一 (工具,参数) 调用次数超过 repeat_limit;
+      2. 振荡 —— 最近 window 次调用只在 ≤ distinct 个签名间反复横跳。
+
+    被拦截的调用返回一段 error JSON 回灌给模型,提示其换策略或直接作答。
+    累计拦截次数达到 hard_stop_after 后,`should_finalize` 置真——调用方据此
+    提前进入"禁工具强制作答"收尾,而非空耗到 max_iterations。
+
+    与 `_note_tool_result` 互补:后者在工具**已执行**且结果无效时追加软提示;
+    本类在**执行前**对结构性死循环硬熔断,二者叠加生效。
+    """
+
+    def __init__(
+        self,
+        repeat_limit: int = 2,
+        oscillation_window: int = 4,
+        oscillation_distinct: int = 2,
+        hard_stop_after: int = 3,
+    ):
+        self.repeat_limit = repeat_limit
+        self.oscillation_window = oscillation_window
+        self.oscillation_distinct = oscillation_distinct
+        self.hard_stop_after = hard_stop_after
+        self._sig_counts: dict[str, int] = {}
+        self._recent_sigs: list[str] = []
+        self.interceptions = 0
+
+    def inspect(self, func_name: str, func_args: dict) -> str | None:
+        """
+        登记一次工具调用。返回 None 表示放行；返回 str 表示拦截,
+        该字符串应作为工具结果回灌给模型(不要真正执行工具)。
+        """
+        sig = _tool_signature(func_name, func_args)
+        self._sig_counts[sig] = self._sig_counts.get(sig, 0) + 1
+        self._recent_sigs.append(sig)
+
+        # 1) 完全相同调用超阈值 —— 第 (repeat_limit+1) 次起拦截
+        if self._sig_counts[sig] > self.repeat_limit:
+            self.interceptions += 1
+            return json.dumps(
+                {
+                    "error": "duplicate_call_blocked",
+                    "hint": (
+                        f"你已用完全相同的参数调用 `{func_name}` "
+                        f"{self._sig_counts[sig]} 次。该调用已被拦截、不会再执行。"
+                        "请勿重复——改变参数/换工具,或基于已掌握的信息直接作答。"
+                    ),
+                },
+                ensure_ascii=False,
+            )
+
+        # 2) 振荡:最近 window 次只在 ≤ distinct 个签名间横跳
+        window = self._recent_sigs[-self.oscillation_window:]
+        if (
+            len(window) >= self.oscillation_window
+            and len(set(window)) <= self.oscillation_distinct
+        ):
+            self.interceptions += 1
+            return json.dumps(
+                {
+                    "error": "oscillation_detected",
+                    "hint": (
+                        "检测到你在少数几个工具调用间反复横跳且无新进展。"
+                        "请停止循环,基于已获取的信息直接给出结论。"
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        return None
+
+    @property
+    def should_finalize(self) -> bool:
+        """累计拦截达阈值 → 提示调用方提前收尾(禁工具强制作答)。"""
+        return self.interceptions >= self.hard_stop_after
+
+
 async def _load_source_components(user_id: int | None) -> list[dict]:
     """
     查询用户已构建源码索引的组件列表（含文件/符号规模，用于注入 system prompt）。
@@ -146,6 +243,22 @@ async def _load_source_components(user_id: int | None) -> list[dict]:
         }
         for c in comps
     ]
+
+
+async def _wiki_available() -> bool:
+    """
+    全局 wiki 知识库是否已建索引（决定是否暴露 wiki 工具 + 注入 wiki 指导）。
+
+    wiki 是全局共享、与登录用户无关的只读知识库，故无需 user_id。同步的 sqlite
+    查询经 asyncio.to_thread 调度，避免阻塞事件循环；任何异常都视作「不可用」，
+    绝不因 wiki 故障阻断对话。
+    """
+    try:
+        from wiki import store as wiki_store
+
+        return await asyncio.to_thread(wiki_store.is_indexed)
+    except Exception:
+        return False
 
 
 def _prompt_vars(summary: dict, source_components) -> dict:
@@ -170,16 +283,19 @@ def _prompt_vars(summary: dict, source_components) -> dict:
     }
 
 
-def _resolve_system_prompt(summary, source_components) -> str:
+def _resolve_system_prompt(summary, source_components, wiki_available=False) -> str:
     """
     解析 system prompt：数据分析模式（summary 非空）优先用 Langfuse 托管版本，
     拉取失败 / 非数据分析模式回退到本地 build_system_prompt。
 
     任何异常都回退到本地、绝不抛——保证 prompt 拉取问题不会阻断 LLM 调用。
     非数据分析模式（无 summary 的 QA / source-QA）直接走本地，不经 Langfuse 托管。
+
+    wiki_available：全局 wiki 已建索引时，无论走本地还是 Langfuse 托管版本，
+    都追加 wiki 检索指导段（托管 prompt 不含 wiki 段，故在外层补上）。
     """
     if summary is None:
-        return build_system_prompt(None, source_components)
+        return build_system_prompt(None, source_components, wiki_available)
 
     from config import AppConfig
 
@@ -187,12 +303,15 @@ def _resolve_system_prompt(summary, source_components) -> str:
     prompt = get_client().get_prompt(lf.prompt_name, lf.prompt_label)
     if prompt is not None:
         try:
-            return prompt.compile(**_prompt_vars(summary, source_components))
+            compiled = prompt.compile(**_prompt_vars(summary, source_components))
+            if wiki_available:
+                compiled = compiled + "\n\n" + WIKI_GUIDANCE_PROMPT.render()
+            return compiled
         except Exception as e:
             logger.warning(
                 "Langfuse prompt compile failed, fallback to local: %s", e
             )
-    return build_system_prompt(summary, source_components)
+    return build_system_prompt(summary, source_components, wiki_available)
 
 
 class Agent:
@@ -270,8 +389,11 @@ class Agent:
         # 数据上下文仅在有日志时注入。
         uid = getattr(session, "user_id", 0)
         source_components = await _load_source_components(uid)
+        wiki_available = await _wiki_available()
         system_prompt = _resolve_system_prompt(
-            dataset.summary if dataset is not None else None, source_components
+            dataset.summary if dataset is not None else None,
+            source_components,
+            wiki_available,
         )
         ctx = self._make_context(system_prompt)
 
@@ -287,6 +409,8 @@ class Agent:
             exposed_groups.add("log")
         if source_components:
             exposed_groups.add("source")
+        if wiki_available:
+            exposed_groups.add("wiki")
         tool_schemas = (
             ToolRegistry.get_schemas(groups=exposed_groups) if exposed_groups else []
         )
@@ -315,14 +439,18 @@ class Agent:
         }
         # 同一 (工具,参数) 无效调用计数，用于检测对工具的死循环调用
         unproductive_calls: dict[str, int] = {}
+        # 死循环熔断器 + 提前收尾标志（检测到死循环即强制下一轮禁工具作答）
+        loop_guard = LoopGuard()
+        force_finalize = False
 
         for iteration in range(self.max_iterations):
             session = self.session_manager.get(session_id)
             if not session:
                 raise ValueError(f"Session lost during run: {session_id}")
 
-            # 最后一轮：禁用工具 + 注入收尾指令，强制 LLM 用已有信息直接作答
-            is_last = iteration == self.max_iterations - 1
+            # 收尾轮：到达迭代上限，或循环熔断器已判定死循环 → 禁用工具 + 注入
+            # 收尾指令，强制 LLM 用已有信息直接作答。
+            is_last = iteration == self.max_iterations - 1 or force_finalize
 
             # 统一通过上下文构建器组装消息：system + 历史，并在超 token 预算时
             # 省略陈旧工具结果（压制 ReAct 重发历史的二次方膨胀）。iteration 0 时
@@ -333,6 +461,13 @@ class Agent:
                 messages.append(
                     {"role": "system", "content": _FINAL_STEP_DIRECTIVE}
                 )
+            elif exposed_groups:
+                # 预算软着陆：临近迭代上限时提示收敛，避免一路探索到被硬切断
+                remaining = self.max_iterations - iteration
+                if remaining <= _SOFT_LANDING_WINDOW:
+                    messages.append(
+                        {"role": "system", "content": _convergence_directive(remaining)}
+                    )
 
             logger.debug(
                 "ReAct iteration %d: %d messages",
@@ -378,25 +513,35 @@ class Agent:
                             json.dumps(func_args, ensure_ascii=False),
                         )
 
-                        # ---- Langfuse: 工具 span（自动嵌套到 iter_span 下） ----
-                        with tracer.observation(
-                            name=f"tool-{func_name}",
-                            input={
-                                "tool_name": func_name,
-                                "arguments": func_args,
-                            },
-                        ) as tool_span:
-                            result_str = await ToolRegistry.execute(
-                                func_name, func_args, effective_dataset
+                        # ---- 死循环熔断：执行前登记，命中则短路不执行 ----
+                        intercept = loop_guard.inspect(func_name, func_args)
+                        if intercept is not None:
+                            logger.warning(
+                                "Tool call blocked by LoopGuard: %s(%s)",
+                                func_name,
+                                json.dumps(func_args, ensure_ascii=False),
                             )
-                            tool_span.update(
-                                output={"result": result_str[:2000]},
-                            )
+                            result_str = intercept
+                        else:
+                            # ---- Langfuse: 工具 span（自动嵌套到 iter_span 下） ----
+                            with tracer.observation(
+                                name=f"tool-{func_name}",
+                                input={
+                                    "tool_name": func_name,
+                                    "arguments": func_args,
+                                },
+                            ) as tool_span:
+                                result_str = await ToolRegistry.execute(
+                                    func_name, func_args, effective_dataset
+                                )
+                                tool_span.update(
+                                    output={"result": result_str[:2000]},
+                                )
 
-                        # 同一调用反复无效时，给结果追加换策略提示
-                        result_str = _note_tool_result(
-                            unproductive_calls, func_name, func_args, result_str
-                        )
+                            # 同一调用反复无效时，给结果追加换策略提示
+                            result_str = _note_tool_result(
+                                unproductive_calls, func_name, func_args, result_str
+                            )
 
                         # 将工具结果加入会话
                         self.session_manager.add_message(
@@ -407,6 +552,16 @@ class Agent:
                                 "content": result_str,
                             },
                         )
+
+                    # 累计拦截达阈值 → 下一轮强制收尾（禁工具作答），不空耗到上限
+                    if loop_guard.should_finalize:
+                        logger.warning(
+                            "LoopGuard tripped (%d interceptions) for session %s, "
+                            "forcing finalize",
+                            loop_guard.interceptions,
+                            session_id,
+                        )
+                        force_finalize = True
 
                     iter_span.update(
                         output={
@@ -489,8 +644,11 @@ class Agent:
         # 数据上下文仅在有日志时注入。
         uid = getattr(session, "user_id", 0)
         source_components = await _load_source_components(uid)
+        wiki_available = await _wiki_available()
         system_prompt = _resolve_system_prompt(
-            dataset.summary if dataset is not None else None, source_components
+            dataset.summary if dataset is not None else None,
+            source_components,
+            wiki_available,
         )
         ctx = self._make_context(system_prompt)
 
@@ -506,6 +664,8 @@ class Agent:
             exposed_groups.add("log")
         if source_components:
             exposed_groups.add("source")
+        if wiki_available:
+            exposed_groups.add("wiki")
         tool_schemas = (
             ToolRegistry.get_schemas(groups=exposed_groups) if exposed_groups else []
         )
@@ -534,14 +694,18 @@ class Agent:
         }
         # 同一 (工具,参数) 无效调用计数，用于检测对工具的死循环调用
         unproductive_calls: dict[str, int] = {}
+        # 死循环熔断器 + 提前收尾标志（检测到死循环即强制下一轮禁工具作答）
+        loop_guard = LoopGuard()
+        force_finalize = False
 
         for iteration in range(self.max_iterations):
             session = self.session_manager.get(session_id)
             if not session:
                 raise ValueError(f"Session lost during run: {session_id}")
 
-            # 最后一轮：禁用工具 + 注入收尾指令，强制 LLM 用已有信息直接作答
-            is_last = iteration == self.max_iterations - 1
+            # 收尾轮：到达迭代上限，或循环熔断器已判定死循环 → 禁用工具 + 注入
+            # 收尾指令，强制 LLM 用已有信息直接作答。
+            is_last = iteration == self.max_iterations - 1 or force_finalize
 
             # 统一通过上下文构建器组装消息：system + 历史，并在超 token 预算时
             # 省略陈旧工具结果（压制 ReAct 重发历史的二次方膨胀）。iteration 0 时
@@ -552,6 +716,13 @@ class Agent:
                 messages.append(
                     {"role": "system", "content": _FINAL_STEP_DIRECTIVE}
                 )
+            elif exposed_groups:
+                # 预算软着陆：临近迭代上限时提示收敛，避免一路探索到被硬切断
+                remaining = self.max_iterations - iteration
+                if remaining <= _SOFT_LANDING_WINDOW:
+                    messages.append(
+                        {"role": "system", "content": _convergence_directive(remaining)}
+                    )
 
             logger.debug(
                 "ReAct iteration %d [stream]: %d messages",
@@ -629,24 +800,34 @@ class Agent:
                             "status": "start",
                         }
 
-                        with tracer.observation(
-                            name=f"tool-{func_name}",
-                            input={
-                                "tool_name": func_name,
-                                "arguments": func_args,
-                            },
-                        ) as tool_span:
-                            result_str = await ToolRegistry.execute(
-                                func_name, func_args, effective_dataset
+                        # ---- 死循环熔断：执行前登记，命中则短路不执行 ----
+                        intercept = loop_guard.inspect(func_name, func_args)
+                        if intercept is not None:
+                            logger.warning(
+                                "Tool call blocked by LoopGuard: %s(%s)",
+                                func_name,
+                                json.dumps(func_args, ensure_ascii=False),
                             )
-                            tool_span.update(
-                                output={"result": result_str[:2000]},
-                            )
+                            result_str = intercept
+                        else:
+                            with tracer.observation(
+                                name=f"tool-{func_name}",
+                                input={
+                                    "tool_name": func_name,
+                                    "arguments": func_args,
+                                },
+                            ) as tool_span:
+                                result_str = await ToolRegistry.execute(
+                                    func_name, func_args, effective_dataset
+                                )
+                                tool_span.update(
+                                    output={"result": result_str[:2000]},
+                                )
 
-                        # 同一调用反复无效时，给结果追加换策略提示
-                        result_str = _note_tool_result(
-                            unproductive_calls, func_name, func_args, result_str
-                        )
+                            # 同一调用反复无效时，给结果追加换策略提示
+                            result_str = _note_tool_result(
+                                unproductive_calls, func_name, func_args, result_str
+                            )
 
                         # 将工具结果加入会话
                         self.session_manager.add_message(
@@ -664,6 +845,16 @@ class Agent:
                             "tool": func_name,
                             "status": "done",
                         }
+
+                    # 累计拦截达阈值 → 下一轮强制收尾（禁工具作答），不空耗到上限
+                    if loop_guard.should_finalize:
+                        logger.warning(
+                            "LoopGuard tripped (%d interceptions) for session %s, "
+                            "forcing finalize",
+                            loop_guard.interceptions,
+                            session_id,
+                        )
+                        force_finalize = True
 
                     continue
 

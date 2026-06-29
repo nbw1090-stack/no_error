@@ -70,6 +70,12 @@ class ObservabilityClient:
             yield _NoopObservation()
             return
 
+        # 仅「建 observation 本身」失败时降级为 noop（追踪不可用不该拖垮业务）。
+        # 关键：一旦成功进入 observation，body（如 LLM 调用）抛出的业务异常必须
+        # 原样向上传播——绝不能在 except 里再 yield 一次。contextmanager 只能 yield
+        # 一次；异常被 throw 进 yield 点后若再次 yield，Python 报
+        # "generator didn't stop after throw()"，既掩盖真异常（如 402/400/超时），
+        # 又污染 OTEL 上下文，导致后续每个 observation 连环失败。
         try:
             kwargs = dict(
                 name=name,
@@ -86,23 +92,28 @@ class ObservabilityClient:
                 # Langfuse v4 用 trace_context 指定 trace id；SDK 会把该 span
                 # 标记为 root（AS_ROOT=True），整条链路共用此 id。
                 kwargs["trace_context"] = {"trace_id": trace_id}
-            with self._langfuse.start_as_current_observation(**kwargs) as obs:
-                # 尽早传播 trace 级属性：必须在子节点（LLM 调用等）生成之前激活，
-                # 否则早于此处的 observation 不会被纳入按 user/session 的聚合。
-                if user_id or session_id or trace_metadata:
-                    from langfuse import propagate_attributes
-
-                    with propagate_attributes(
-                        user_id=user_id,
-                        session_id=session_id,
-                        metadata=trace_metadata,
-                    ):
-                        yield obs
-                else:
-                    yield obs
+            cm = self._langfuse.start_as_current_observation(**kwargs)
         except Exception as e:
-            logger.warning("Langfuse observation '%s' failed: %s", name, e)
+            logger.warning("Langfuse observation '%s' setup failed: %s", name, e)
             yield _NoopObservation()
+            return
+
+        # observation 建好后进入 body。body 异常经 `with cm` 记录到 span 并向上
+        # 传播（不在此吞掉）；调用方（main.py chat / eval task）各自有 try/except。
+        with cm as obs:
+            # 尽早传播 trace 级属性：必须在子节点（LLM 调用等）生成之前激活，
+            # 否则早于此处的 observation 不会被纳入按 user/session 的聚合。
+            if user_id or session_id or trace_metadata:
+                from langfuse import propagate_attributes
+
+                with propagate_attributes(
+                    user_id=user_id,
+                    session_id=session_id,
+                    metadata=trace_metadata,
+                ):
+                    yield obs
+            else:
+                yield obs
 
     def score(
         self,

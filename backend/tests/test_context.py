@@ -43,6 +43,24 @@ def test_history_trimmed_to_max_history():
     assert body[-1]["content"] == "49"  # 保留最近的
 
 
+def test_trim_drops_leading_orphan_tool_messages():
+    # 回归：条数裁剪从 (assistant tool_calls → tool) 配对中间切开时，裁剪后历史
+    # 不得以孤儿 tool 消息开头，否则 DeepSeek/OpenAI 报 400。
+    ctx = ConversationContext(system_prompt="SYS", max_history=3)
+    history = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c0"}]},
+        _tool_msg("c0", "r0"),
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
+        _tool_msg("c1", "r1"),
+    ]
+    msgs = ctx.build_messages(history=history)
+    roles = [m["role"] for m in msgs]
+    # 朴素切片 [-3:] = [tool c0, assistant c1, tool c1]，孤儿 tool c0 被丢弃
+    assert roles == ["system", "assistant", "tool"]
+    assert msgs[1]["tool_calls"][0]["id"] == "c1"
+
+
 def test_history_not_trimmed_under_limit():
     ctx = ConversationContext(system_prompt="SYS", max_history=10)
     history = [{"role": "user", "content": str(i)} for i in range(5)]

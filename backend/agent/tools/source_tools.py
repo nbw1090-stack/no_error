@@ -837,3 +837,466 @@ def _find_usages(
                     if file_hits >= per_file_cap:
                         break
     return results
+
+
+# ============================================================
+# 多跳导航（trace_call_chain）+ 跨组件接口解析（resolve_interface）
+#
+# 设计原则:把「导航」(廉价:名字 + file:line + 每跳一行调用语句,无函数体) 与
+# 「细看」(昂贵:单跳函数体,用 gather_code_context 懒加载) 拆开。多跳工具只吐骨架,
+# 避免把 N 个函数体塞进一个工具结果——那会被 ReAct 每轮全量重发(二次方膨胀),且因
+# 它恰是「最近一条」躲不过 context.py 的旧结果省略。骨架由构造即小(~KB 级)。
+# ============================================================
+
+# 服务端硬上限:挡住 LLM 传入过大的 depth/breadth 撑爆骨架。
+_TRACE_MAX_DEPTH = 4
+_TRACE_MAX_BREADTH = 5
+# unresolved（解析不到本组件符号、又非接口）的 callee 名只名字-only 收集,封顶。
+_TRACE_MAX_UNRESOLVED = 12
+
+# 调用点正则:取「紧贴左括号的标识符」。对 foo()/obj.method()/obj:method() 均命中
+# 被调用的那个名字(method/foo),因为 mdb 形如 mdb.try_get_object( 中 . 后的
+# try_get_object 才贴着 (，mdb 贴着 . 不会误命中。
+_CALL_RE = re.compile(r"([A-Za-z_]\w*)\s*\(")
+
+# 控制流 / 语言关键字停用词:它们后面也跟 (，但不是函数调用。
+_CALL_KEYWORDS = frozenset(
+    {
+        # Lua
+        "if", "elseif", "while", "for", "return", "function", "and", "or",
+        "not", "do", "then", "end", "until", "repeat", "in", "local",
+        # C / C++
+        "switch", "sizeof", "catch", "defined", "static_cast", "dynamic_cast",
+        "reinterpret_cast", "const_cast", "decltype", "typeof", "alignof",
+        "else", "case", "goto",
+    }
+)
+
+# mdb/dbus 接口字面串:openUBMC 跨组件通信的「边」本质是这种字符串常量。
+_INTERFACE_RE = re.compile(r"bmc\.(?:dev|kepler)\.[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*")
+
+# 接口命中的角色启发式(同行邻近 token,小写后子串判定)。provide 先判:注册语义更具体。
+_PROVIDE_SIGNALS = (
+    "register", "add_object", "addobject", "new_object", "create_object",
+    "add_interface", "object_define", ":implement", "implement(", "model.json",
+)
+_CONSUME_SIGNALS = (
+    "make_proxy", "try_get_object", "get_object_list", "get_object",
+    "getobject", "prop_table[", "proxy", "subscribe", "lookup",
+)
+
+
+def _read_raw_lines(user_id: int, component: str, rel_path: str) -> list[str]:
+    """读源码快照文件的原始行(不渲染、不折叠)。读不到返回空列表。"""
+    from ast_analysis.service import _component_source_dir
+
+    path = os.path.join(_component_source_dir(user_id, component), rel_path)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read().splitlines()
+    except OSError:
+        return []
+
+
+def _detect_interface(line: str) -> str | None:
+    """从一行里抽出 bmc.dev.* / bmc.kepler.* 接口字面串(取首个)。"""
+    m = _INTERFACE_RE.search(line)
+    return m.group(0).rstrip(".") if m else None
+
+
+def _classify_interface_hit(line: str) -> str | None:
+    """按同行邻近 token 把接口命中分类为 provide / consume；都不像则 None。"""
+    low = line.lower()
+    if any(sig in low for sig in _PROVIDE_SIGNALS):
+        return "provide"
+    if any(sig in low for sig in _CONSUME_SIGNALS):
+        return "consume"
+    return None
+
+
+def _extract_callees(
+    body_lines: list[tuple[int, str]], self_name: str
+) -> list[tuple[str, int, str]]:
+    """
+    从函数体行里抽 callee。
+
+    Args:
+        body_lines: [(行号, 原始行文本), ...]
+        self_name: 锚点符号自身名(及其方法尾段),用于跳过定义/自递归噪声。
+
+    Returns:
+        [(callee 名, 调用行号, 调用行文本), ...]，按出现顺序、同名去重。
+    """
+    self_token = _entry_symbol_token(self_name)
+    seen: set[str] = set()
+    out: list[tuple[str, int, str]] = []
+    for lineno, raw in body_lines:
+        for m in _CALL_RE.finditer(raw):
+            name = m.group(1)
+            if name in _CALL_KEYWORDS:
+                continue
+            if name == self_name or name == self_token:
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            out.append((name, lineno, raw))
+    return out
+
+
+def _resolve_callee(user_id: int, component: str, callee: str) -> dict | None:
+    """
+    把 callee 名反查回本组件的符号定义(精确名优先,其次 Lua 方法尾段匹配)。
+
+    find_symbols_by_name 是子串匹配,这里收紧为精确命中,避免 init 命中 init_card。
+
+    Returns:
+        {rel_path, name, kind, start_line, end_line} 或 None。
+    """
+    from ast_analysis import db
+
+    cands = db.find_symbols_by_name(user_id, component, callee, limit=20)
+    if not cands:
+        return None
+    # 精确名优先
+    for c in cands:
+        if c["name"] == callee:
+            return c
+    # 退化:Lua mod:method / mod.method 的尾段等于 callee
+    for c in cands:
+        if _entry_symbol_token(c["name"]) == callee:
+            return c
+    return None
+
+
+def _resolve_anchor(
+    user_id: int,
+    component: str,
+    name: str | None,
+    file: str | None,
+    line: int | None,
+) -> dict | None:
+    """解析 trace 锚点:file+line(精确,优先) > name。返回符号 dict 或 None。"""
+    from ast_analysis import db
+
+    if file and line is not None:
+        cands = db.find_function_at_line(
+            user_id, component, os.path.basename(file or ""), line
+        )
+        return cands[0] if cands else None
+    if name:
+        cands = db.find_symbols_by_name(user_id, component, name, limit=1)
+        return cands[0] if cands else None
+    return None
+
+
+@ToolRegistry.register(
+    name="trace_call_chain",
+    description=(
+        "多跳调用链「导航骨架」:从锚点符号出发,逐跳列出它调用了哪些函数/方法"
+        "(函数名 + file:line + 每跳那一行调用语句),**不含函数体**,载荷很小。"
+        "当根因可能在调用链更深处(跨多层函数)、需要先看清链路再决定深入哪一跳时,"
+        "**先调本工具**;读完骨架后,用 gather_code_context 只拉你挑中的那一个函数体。"
+        "命中的 mdb 接口(bmc.dev.*/bmc.kepler.*)会列在 interfaces_seen,可交给 "
+        "resolve_interface 定位 provider 组件。锚点二选一:name 或 file+line"
+        "(file+line 更精确优先)。需先在「组件管理」构建源码索引。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "component": {"type": "string", "description": "组件名称"},
+            "name": {
+                "type": "string",
+                "description": "锚点符号名(与 file/line 二选一)",
+            },
+            "file": {
+                "type": "string",
+                "description": "源码文件名(与 line 配合作为行号锚点,更精确)",
+            },
+            "line": {
+                "type": "integer",
+                "description": "出错行号(与 file 配合)",
+            },
+            "max_depth": {
+                "type": "integer",
+                "description": "展开的跳数,默认 3,服务端硬上限 4",
+            },
+            "max_breadth": {
+                "type": "integer",
+                "description": "每跳展开的 callee 数,默认 4,服务端硬上限 5",
+            },
+        },
+        "required": ["component"],
+    },
+    group="source",
+)
+async def trace_call_chain(
+    dataset: LogDataset,
+    component: str,
+    name: str | None = None,
+    file: str | None = None,
+    line: int | None = None,
+    max_depth: int = 3,
+    max_breadth: int = 4,
+) -> dict:
+    """
+    构建调用链骨架(BFS,深度/广度封顶,无函数体)。
+
+    导航优先:只吐名字 + file:line + 每跳一行调用语句;细看交给 gather_code_context。
+    """
+    from ast_analysis import db
+
+    user_id = dataset.user_id
+    if user_id is None:
+        return {"error": "源码索引需登录后可用"}
+
+    if not (file and line is not None) and not name:
+        return {
+            "error": "缺少锚点：需提供 name，或 file+line",
+            "component": component,
+            "hint": "至少提供一个锚点(符号名 或 文件名+行号)",
+        }
+
+    depth_cap = max(1, min(int(max_depth or 3), _TRACE_MAX_DEPTH))
+    breadth_cap = max(1, min(int(max_breadth or 4), _TRACE_MAX_BREADTH))
+
+    anchor_sym = _resolve_anchor(user_id, component, name, file, line)
+    if anchor_sym is None:
+        return _not_found_payload(user_id, component, name=name)
+
+    hops: list[dict] = []
+    interfaces_seen: list[str] = []
+    unresolved: list[str] = []
+    visited: set[tuple[str, str]] = set()
+    depth_reached = 0
+
+    # BFS 队列:(符号 dict, 该符号所在深度)。深度 < depth_cap 的函数才展开其调用。
+    queue: list[tuple[dict, int]] = [(anchor_sym, 0)]
+    visited.add((anchor_sym["rel_path"], anchor_sym["name"]))
+
+    while queue:
+        sym, depth = queue.pop(0)
+        if depth >= depth_cap:
+            continue
+
+        raw = _read_raw_lines(user_id, component, sym["rel_path"])
+        if not raw:
+            continue
+        lo = max(0, int(sym["start_line"]) - 1)
+        hi = min(len(raw), int(sym["end_line"]))
+        body = [(i + 1, raw[i]) for i in range(lo, hi)]
+
+        callees = _extract_callees(body, sym["name"])
+        calls: list[dict] = []
+        truncated = False
+        for callee, call_line, call_src in callees:
+            iface = _detect_interface(call_src)
+            resolved = _resolve_callee(user_id, component, callee)
+            # 只保留:能解析到本组件符号的,或命中接口的;其余(stdlib 等)丢进 unresolved
+            if resolved is None and iface is None:
+                if callee not in unresolved and len(unresolved) < _TRACE_MAX_UNRESOLVED:
+                    unresolved.append(callee)
+                continue
+            if len(calls) >= breadth_cap:
+                truncated = True
+                break
+            entry: dict = {
+                "callee": callee,
+                "call_line": call_line,
+                "call_src": f"{call_line:>5} | {call_src.rstrip()}",
+            }
+            if resolved is not None:
+                entry["resolved"] = {
+                    "rel_path": resolved["rel_path"],
+                    "start_line": resolved["start_line"],
+                }
+            else:
+                entry["resolved"] = None
+            if iface is not None:
+                entry["interface"] = iface
+                if iface not in interfaces_seen:
+                    interfaces_seen.append(iface)
+            calls.append(entry)
+
+            # 入队更深一跳(去环 + 仅 resolved 的能继续展开)
+            if resolved is not None:
+                key = (resolved["rel_path"], resolved["name"])
+                if key not in visited and depth + 1 < depth_cap:
+                    visited.add(key)
+                    queue.append((resolved, depth + 1))
+
+        hops.append(
+            {
+                "depth": depth,
+                "from": {
+                    "function": sym["name"],
+                    "rel_path": sym["rel_path"],
+                    "start_line": sym["start_line"],
+                    "end_line": sym["end_line"],
+                },
+                "calls": calls,
+                "truncated_calls": truncated,
+            }
+        )
+        depth_reached = max(depth_reached, depth + 1 if calls else depth)
+
+    return {
+        "component": component,
+        "anchor": {
+            "rel_path": anchor_sym["rel_path"],
+            "function": anchor_sym["name"],
+            "start_line": anchor_sym["start_line"],
+            "end_line": anchor_sym["end_line"],
+        },
+        "hops": hops,
+        "interfaces_seen": interfaces_seen,
+        "unresolved_calls": unresolved,
+        "depth_reached": depth_reached,
+        "guidance": (
+            "这是导航骨架(名字 + file:line + 每跳一行调用语句,无函数体)。"
+            "挑出可疑那一跳,用 gather_code_context(component, file=<rel_path>, "
+            "line=<start_line>) 读那一个函数体;对 interfaces_seen 里的接口用 "
+            "resolve_interface(name) 找 provider 组件。"
+        ),
+    }
+
+
+def _scan_component_interface(
+    root: str, interface: str, cap: int
+) -> list[dict]:
+    """
+    在单个组件快照根下有界扫描接口字面串,返回带角色分类的命中。
+
+    复用 _find_usages 的遍历约束(analyzer._SKIP_DIRS / _EXT_TO_LANG / 大小限制)。
+
+    Returns:
+        [{rel_path, line, signal(=role 信号词原文或''), role}, ...]，总量 ≤ cap。
+    """
+    from ast_analysis import analyzer
+
+    results: list[dict] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in analyzer._SKIP_DIRS and not d.startswith(".")
+        ]
+        for fname in filenames:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in analyzer._EXT_TO_LANG:
+                continue
+            fpath = os.path.join(dirpath, fname)
+            try:
+                if os.path.getsize(fpath) > analyzer._MAX_FILE_BYTES:
+                    continue
+                with open(fpath, "r", encoding="utf-8", errors="replace") as fh:
+                    lines = fh.read().splitlines()
+            except OSError:
+                continue
+            rel = os.path.relpath(fpath, root).replace(os.sep, "/")
+            for i, raw in enumerate(lines, start=1):
+                if interface in raw:
+                    results.append(
+                        {
+                            "rel_path": rel,
+                            "line": i,
+                            "role": _classify_interface_hit(raw),
+                        }
+                    )
+                    if len(results) >= cap:
+                        return results
+    return results
+
+
+@ToolRegistry.register(
+    name="resolve_interface",
+    description=(
+        "把一个 mdb/dbus 接口(bmc.dev.*/bmc.kepler.*)解析到「哪个组件提供(provide)、"
+        "哪些组件消费(consume)」。openUBMC 跨组件根因常是:消费侧拿不到对象/属性,真正"
+        "的根因在 provider 组件。当日志/调用链指向某接口、需判定是哪一侧出问题时调用。"
+        "在**所有已索引组件**里扫接口字面串并分 provide/consume;若没有已索引的 provider"
+        "(常见,provider 组件未被索引),会用 wiki 兜底点名架构文档里的 provider。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "接口名,如 bmc.dev.PCIeDevice",
+            },
+            "max_hits": {
+                "type": "integer",
+                "description": "每组件最多返回的命中数,默认 8",
+            },
+        },
+        "required": ["name"],
+    },
+    group="source",
+)
+async def resolve_interface(
+    dataset: LogDataset,
+    name: str,
+    max_hits: int = 8,
+) -> dict:
+    """在已索引组件里定位接口的 provider/consumer;无已索引 provider 时 wiki 兜底。"""
+    from ast_analysis import db
+    from ast_analysis.service import _component_source_dir
+
+    user_id = dataset.user_id
+    if user_id is None:
+        return {"error": "源码索引需登录后可用"}
+
+    interface = (name or "").strip()
+    if not interface:
+        return {"error": "缺少接口名", "hint": "请提供接口名,如 bmc.dev.PCIeDevice"}
+
+    cap = max(1, int(max_hits or 8))
+    providers: list[dict] = []
+    consumers: list[dict] = []
+    for comp in db.list_user_components(user_id):
+        cname = comp["component"]
+        root = _component_source_dir(user_id, cname)
+        if not os.path.isdir(root):
+            continue
+        for hit in _scan_component_interface(root, interface, cap):
+            row = {
+                "component": cname,
+                "rel_path": hit["rel_path"],
+                "line": hit["line"],
+                "signal": hit["role"] or "",
+            }
+            # provide 信号明确才算 provider;其余(consume / 无信号)归 consumer 侧
+            if hit["role"] == "provide":
+                providers.append(row)
+            else:
+                consumers.append(row)
+
+    result: dict = {
+        "interface": interface,
+        "providers": providers[:cap],
+        "consumers": consumers[:cap],
+        "provider_indexed": bool(providers),
+    }
+
+    # wiki 兜底:没有已索引 provider 时,从架构文档点名 provider(不臆造其代码)
+    if not providers:
+        try:
+            from wiki import store as wiki_store
+
+            if wiki_store.is_indexed():
+                hits = wiki_store.search(interface, top_k=3)
+                if hits:
+                    top = hits[0]
+                    result["wiki_hint"] = {
+                        "slug": top["slug"],
+                        "title": top["title"],
+                        "snippet": top["snippet"],
+                    }
+        except Exception:
+            pass
+
+    result["guidance"] = (
+        "对象/属性缺失时,provider 组件通常是根因。provider_indexed 为 false 时,"
+        "从 wiki_hint 点名 provider,不要臆造它的代码;并在回答里指出消费侧的容错改法。"
+    )
+    return result

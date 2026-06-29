@@ -289,6 +289,198 @@ async def test_gather_symbol_not_found(authed, multi_fake_clone):
 
 
 # ============================================================
+# trace_call_chain 工具测试
+#
+# 消费侧链:get_device_name → (mdb.try_get_object 'bmc.dev.PCIeDevice') + read_port。
+# read_port 在同组件可解析(下一跳);try_get_object 不可解析但命中接口(保留)。
+# provider 侧 pcie_device 用 register('bmc.dev.PCIeDevice') 提供接口。
+# ============================================================
+
+# card_mgmt.lua（sensor，消费侧）
+_CHAIN_CONSUMER = (
+    "local function get_device_name()\n"                              # 1
+    "  local obj = mdb.try_get_object('bmc.dev.PCIeDevice', path)\n"  # 2
+    "  return read_port(obj)\n"                                       # 3
+    "end\n"                                                           # 4
+    "\n"                                                              # 5
+    "local function read_port(obj)\n"                                 # 6
+    "  return obj.port\n"                                             # 7
+    "end\n"                                                           # 8
+)
+
+# service.lua（pcie_device，提供侧）
+_CHAIN_PROVIDER = (
+    "local function setup()\n"                          # 1
+    "  register('bmc.dev.PCIeDevice', handler)\n"       # 2 —— provide 信号 register
+    "end\n"                                             # 3
+)
+
+
+@pytest.fixture
+def chain_fake_clone(monkeypatch):
+    """按组件名(dest_dir basename)写不同内容:sensor=消费侧链,pcie_device=提供侧。"""
+    state = {"sha": "ccccccc000000000000000000000000000000cccc"}
+
+    def _fake_clone(git_url, branch, dest_dir, timeout=300):
+        comp = os.path.basename(dest_dir.rstrip("/"))
+        os.makedirs(dest_dir, exist_ok=True)
+        if comp == "pcie_device":
+            with open(os.path.join(dest_dir, "service.lua"), "w", encoding="utf-8") as fh:
+                fh.write(_CHAIN_PROVIDER)
+        else:
+            with open(os.path.join(dest_dir, "card_mgmt.lua"), "w", encoding="utf-8") as fh:
+                fh.write(_CHAIN_CONSUMER)
+        return state["sha"]
+
+    def _fake_remote(git_url, branch, timeout=30):
+        return state["sha"]
+
+    import ast_analysis.service as svc
+
+    monkeypatch.setattr(svc.downloader, "clone_component", _fake_clone)
+    monkeypatch.setattr(svc.downloader, "remote_commit", _fake_remote)
+    return state
+
+
+async def _exec_trace(args, user_id):
+    dataset = LogDataset(entries=[], summary={}, user_id=user_id)
+    raw = await ToolRegistry.execute("trace_call_chain", args, dataset)
+    return raw, json.loads(raw)
+
+
+async def test_trace_skeleton_no_body(authed, chain_fake_clone):
+    """骨架含调用链(名字+file:line+调用行)且不含被调函数体。"""
+    _analyze(authed, ["sensor"])
+    raw, result = await _exec_trace(
+        {"component": "sensor", "file": "card_mgmt.lua", "line": 2},
+        authed["user_id"],
+    )
+    assert result["anchor"]["function"] == "get_device_name"
+
+    # 接口被识别
+    assert "bmc.dev.PCIeDevice" in result["interfaces_seen"]
+
+    # 收集所有 call 项
+    calls = [c for hop in result["hops"] for c in hop["calls"]]
+    callees = {c["callee"] for c in calls}
+    assert "try_get_object" in callees   # 接口命中,保留(resolved=null)
+    assert "read_port" in callees         # 同组件可解析(下一跳锚点)
+
+    # try_get_object 带接口、resolved 为 null
+    tgo = next(c for c in calls if c["callee"] == "try_get_object")
+    assert tgo.get("interface") == "bmc.dev.PCIeDevice"
+    assert tgo["resolved"] is None
+
+    # read_port 解析到定义(第 6 行)
+    rp = next(c for c in calls if c["callee"] == "read_port")
+    assert rp["resolved"]["rel_path"] == "card_mgmt.lua"
+    assert rp["resolved"]["start_line"] == 6
+
+    # 关键:不含被调函数体——read_port 的体 `return obj.port` 不应出现在骨架里
+    assert "obj.port" not in raw
+
+
+async def test_trace_depth_cap(authed, chain_fake_clone):
+    """max_depth=1 时只展开锚点本身,不下钻 read_port。"""
+    _analyze(authed, ["sensor"])
+    _, result = await _exec_trace(
+        {"component": "sensor", "name": "get_device_name", "max_depth": 1},
+        authed["user_id"],
+    )
+    # 仅锚点这一跳被展开
+    expanded = {hop["from"]["function"] for hop in result["hops"]}
+    assert expanded == {"get_device_name"}
+
+
+async def test_trace_breadth_cap(authed, chain_fake_clone):
+    """max_breadth=1 时每跳最多 1 个 call,且标记 truncated。"""
+    _analyze(authed, ["sensor"])
+    _, result = await _exec_trace(
+        {"component": "sensor", "name": "get_device_name", "max_breadth": 1},
+        authed["user_id"],
+    )
+    anchor_hop = next(
+        h for h in result["hops"] if h["from"]["function"] == "get_device_name"
+    )
+    assert len(anchor_hop["calls"]) <= 1
+    assert anchor_hop["truncated_calls"] is True
+
+
+async def test_trace_missing_anchor(authed, chain_fake_clone):
+    """既无 name 也无 file+line → 缺少锚点错误。"""
+    _analyze(authed, ["sensor"])
+    _, result = await _exec_trace({"component": "sensor"}, authed["user_id"])
+    assert "error" in result and "锚点" in result["error"]
+
+
+async def test_trace_missing_user_id(chain_fake_clone, tmp_data):
+    """user_id=None → 友好提示。"""
+    _, result = await _exec_trace(
+        {"component": "sensor", "name": "get_device_name"}, None
+    )
+    assert result["error"] == "源码索引需登录后可用"
+
+
+# ============================================================
+# resolve_interface 工具测试
+# ============================================================
+
+async def _exec_resolve(args, user_id):
+    dataset = LogDataset(entries=[], summary={}, user_id=user_id)
+    raw = await ToolRegistry.execute("resolve_interface", args, dataset)
+    return json.loads(raw)
+
+
+async def test_resolve_interface_provider_and_consumer(authed, chain_fake_clone):
+    """两组件都索引:pcie_device 提供 / sensor 消费。"""
+    _analyze(authed, ["sensor", "pcie_device"])
+    result = await _exec_resolve(
+        {"name": "bmc.dev.PCIeDevice"}, authed["user_id"]
+    )
+    assert result["provider_indexed"] is True
+    prov_comps = {p["component"] for p in result["providers"]}
+    cons_comps = {c["component"] for c in result["consumers"]}
+    assert "pcie_device" in prov_comps
+    assert "sensor" in cons_comps
+    # provider 命中行的 signal 应识别为 provide
+    assert any(p["signal"] == "provide" for p in result["providers"])
+
+
+async def test_resolve_interface_wiki_fallback(authed, chain_fake_clone, monkeypatch):
+    """只索引消费侧:无已索引 provider → provider_indexed=False + wiki 兜底。"""
+    _analyze(authed, ["sensor"])  # 不分析 pcie_device
+
+    import wiki.store as wiki_store
+
+    monkeypatch.setattr(wiki_store, "is_indexed", lambda: True)
+    monkeypatch.setattr(
+        wiki_store,
+        "search",
+        lambda q, top_k=5: [
+            {
+                "slug": "mdb-interfaces",
+                "title": "mdb 接口",
+                "description": "",
+                "snippet": "bmc.dev.PCIeDevice 由 pcie_device 提供",
+                "score": 9,
+            }
+        ],
+    )
+
+    result = await _exec_resolve(
+        {"name": "bmc.dev.PCIeDevice"}, authed["user_id"]
+    )
+    assert result["provider_indexed"] is False
+    assert result["wiki_hint"]["slug"] == "mdb-interfaces"
+
+
+async def test_resolve_interface_missing_user_id(chain_fake_clone, tmp_data):
+    """user_id=None → 友好提示。"""
+    result = await _exec_resolve({"name": "bmc.dev.PCIeDevice"}, None)
+    assert result["error"] == "源码索引需登录后可用"
+
+
+# ============================================================
 # summarize_component 工具测试
 #
 # 多目录快照:src/lualib/main.lua(入口符号)+ gen/big.lua(噪声),
@@ -398,13 +590,14 @@ async def test_summarize_missing_user_id(summary_fake_clone, tmp_data):
 # ============================================================
 
 def test_tool_grouping_separates_log_and_source():
-    """源码工具标 group=source,日志工具默认 log,两组可分别取出且不重叠。"""
+    """源码工具标 group=source,日志工具默认 log,wiki 工具 group=wiki,三组互不重叠。"""
     source_schemas = ToolRegistry.get_schemas(groups={"source"})
     source_names = {s["function"]["name"] for s in source_schemas}
     log_names = set(ToolRegistry.get_names(groups={"log"}))
+    wiki_names = set(ToolRegistry.get_names(groups={"wiki"}))
     all_names = set(ToolRegistry.get_names())
 
-    # 6 个源码工具
+    # 8 个源码工具（含多跳导航 trace_call_chain / 跨组件 resolve_interface）
     assert source_names == {
         "get_function_source",
         "search_symbols",
@@ -412,8 +605,13 @@ def test_tool_grouping_separates_log_and_source():
         "get_file_source",
         "gather_code_context",
         "summarize_component",
+        "trace_call_chain",
+        "resolve_interface",
     }
-    # 日志工具与源码工具不重叠,并集 = 全部;groups=None 返回全部
+    # 3 个 wiki 工具（页导航 + 检索兜底）
+    assert wiki_names == {"get_wiki_index", "read_wiki_page", "search_wiki"}
+    # 三组两两不重叠,并集 = 全部;groups=None 返回全部
     assert source_names.isdisjoint(log_names)
-    assert source_names | log_names == all_names
+    assert wiki_names.isdisjoint(source_names | log_names)
+    assert source_names | log_names | wiki_names == all_names
     assert len(ToolRegistry.get_schemas(groups=None)) == len(all_names)

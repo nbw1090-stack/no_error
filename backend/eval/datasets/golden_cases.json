@@ -6,14 +6,27 @@
       "user_id": 3
     },
     "expected_output": {
-      "root_cause_keywords": ["pcie_oob_mgmt_init", "CAPABILITY", "comm.get_info", "oob"],
+      "root_cause_keywords": [
+        "pcie_oob_mgmt_init",
+        "CAPABILITY",
+        "comm.get_info",
+        "oob"
+      ],
       "expected_component": "pcie_device",
-      "expected_citations": ["pcie_card.lua:49"],
-      "expected_tools": ["gather_code_context"],
+      "expected_citations": [
+        "pcie_card.lua:49"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
       "must_use_source": true,
       "reference_answer": "pcie_card.lua:49 的 pcie_oob_mgmt_update_info 调用 pcie_oob_mgmt_init，后者用 comm.get_info(chip_info, e_opcode.CAPABILITY) 与带外管理芯片通信；芯片不可达/不响应/协议不支持时返回 false，于是记 error 并周期性重试。修复方向：在 init 前校验芯片在位与 SMBus 通路、对 get_info 失败细分错误码、加退避重试而非每分钟死重试。"
     },
-    "metadata": {"category": "hardware-init", "difficulty": "medium", "expected_max_iterations": 4}
+    "metadata": {
+      "category": "hardware-init",
+      "difficulty": "medium",
+      "expected_max_iterations": 4
+    }
   },
   {
     "input": {
@@ -22,14 +35,26 @@
       "user_id": 3
     },
     "expected_output": {
-      "root_cause_keywords": ["ncsi_select_package", "ncsi_cmd_ctrl", "NCSI_SUCCESS"],
+      "root_cause_keywords": [
+        "ncsi_select_package",
+        "ncsi_cmd_ctrl",
+        "NCSI_SUCCESS"
+      ],
       "expected_component": "network_adapter",
-      "expected_citations": ["ncsi_package.lua:134"],
-      "expected_tools": ["gather_code_context"],
+      "expected_citations": [
+        "ncsi_package.lua:134"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
       "must_use_source": true,
       "reference_answer": "ncsi_package.lua:134 的 ncsi_select_package 中 ncsi_utils.ncsi_cmd_ctrl() 返回非 NCSI_SUCCESS，select package 命令失败（报文构造/校验/网络传输/设备响应任一环出错）。排查：确认网口在位与链路、抓 ncsi_cmd_ctrl 实际返回码、校验报文结构。"
     },
-    "metadata": {"category": "network-ncsi", "difficulty": "medium", "expected_max_iterations": 4}
+    "metadata": {
+      "category": "network-ncsi",
+      "difficulty": "medium",
+      "expected_max_iterations": 4
+    }
   },
   {
     "input": {
@@ -38,14 +63,26 @@
       "user_id": 3
     },
     "expected_output": {
-      "root_cause_keywords": ["ncsi_cmd_ctrl", "channel", "ncsi"],
+      "root_cause_keywords": [
+        "ncsi_cmd_ctrl",
+        "channel",
+        "ncsi"
+      ],
       "expected_component": "network_adapter",
-      "expected_citations": ["ncsi_channel.lua:172"],
-      "expected_tools": ["gather_code_context"],
+      "expected_citations": [
+        "ncsi_channel.lua:172"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
       "must_use_source": true,
       "reference_answer": "ncsi_channel.lua:172 的 handle_channel_operation 在 enable/disable channel 时 ncsi_cmd_ctrl() 失败（设备无响应或 channel_id 非法）。排查：校验 channel_id 范围、检查设备状态、记录具体返回码。"
     },
-    "metadata": {"category": "network-ncsi", "difficulty": "medium", "expected_max_iterations": 4}
+    "metadata": {
+      "category": "network-ncsi",
+      "difficulty": "medium",
+      "expected_max_iterations": 4
+    }
   },
   {
     "input": {
@@ -54,14 +91,26 @@
       "user_id": 3
     },
     "expected_output": {
-      "root_cause_keywords": ["read_topo_info", "PluginRequest", "topo"],
+      "root_cause_keywords": [
+        "read_topo_info",
+        "PluginRequest",
+        "topo"
+      ],
       "expected_component": "pcie_device",
-      "expected_citations": ["topo_reader.lua:159"],
-      "expected_tools": ["gather_code_context"],
+      "expected_citations": [
+        "topo_reader.lua:159"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
       "must_use_source": true,
       "reference_answer": "topo_reader.lua:159 的 read_topo_info 调 chip:PluginRequest() 读拓扑信息返回 nil/错误，多因 SMC 芯片不可用、插件未加载或 zone_support 配置非法。修复：请求前校验芯片状态与插件注册，必要时回退缓存拓扑。"
     },
-    "metadata": {"category": "topology", "difficulty": "hard", "expected_max_iterations": 5}
+    "metadata": {
+      "category": "topology",
+      "difficulty": "hard",
+      "expected_max_iterations": 5
+    }
   },
   {
     "input": {
@@ -70,14 +119,27 @@
       "user_id": 3
     },
     "expected_output": {
-      "root_cause_keywords": ["get_port_id", "WorkMode", "SerDes", "ModeConfig"],
+      "root_cause_keywords": [
+        "get_port_id",
+        "WorkMode",
+        "SerDes",
+        "ModeConfig"
+      ],
       "expected_component": "pcie_device",
-      "expected_citations": ["biz_topo.lua:337"],
-      "expected_tools": ["gather_code_context"],
+      "expected_citations": [
+        "biz_topo.lua:337"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
       "must_use_source": true,
       "reference_answer": "biz_topo.lua:337 的 get_port_id 在 mode_config.Device[] 里按 SerDes WorkMode（PCIE=1/SATA=3/SAS=4）找匹配项失败——配置里的 WorkMode 与 ModeConfigs 不一致。修复：启动时校验 ModeConfigs、加默认/兜底 mode、日志打印期望与可用 mode。"
     },
-    "metadata": {"category": "topology", "difficulty": "hard", "expected_max_iterations": 5}
+    "metadata": {
+      "category": "topology",
+      "difficulty": "hard",
+      "expected_max_iterations": 5
+    }
   },
   {
     "input": {
@@ -86,14 +148,26 @@
       "user_id": 3
     },
     "expected_output": {
-      "root_cause_keywords": ["get_device", "get_port_id", "SerDes"],
+      "root_cause_keywords": [
+        "get_device",
+        "get_port_id",
+        "SerDes"
+      ],
       "expected_component": "pcie_device",
-      "expected_citations": ["biz_topo.lua:855"],
-      "expected_tools": ["gather_code_context"],
+      "expected_citations": [
+        "biz_topo.lua:855"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
       "must_use_source": true,
       "reference_answer": "biz_topo.lua:855 的 get_device 因 get_port_id 返回 nil 而级联失败——SerDes/mode/device 三元组无匹配（WorkMode 不符或 SerDes 不在 valid 范围）。修复：两段式匹配（严格→放宽）、预校验 SerDes 配置。"
     },
-    "metadata": {"category": "topology", "difficulty": "hard", "expected_max_iterations": 5}
+    "metadata": {
+      "category": "topology",
+      "difficulty": "hard",
+      "expected_max_iterations": 5
+    }
   },
   {
     "input": {
@@ -102,14 +176,26 @@
       "user_id": 3
     },
     "expected_output": {
-      "root_cause_keywords": ["file_service", "路径", "operator"],
+      "root_cause_keywords": [
+        "file_service",
+        "路径",
+        "operator"
+      ],
       "expected_component": "bios",
-      "expected_citations": ["file_service.lua:395"],
-      "expected_tools": ["gather_code_context"],
+      "expected_citations": [
+        "file_service.lua:395"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
       "must_use_source": true,
       "reference_answer": "应取出 bios 组件 file_service.lua 第 395 行附近的真实源码再下结论；注意日志模板与索引行号可能有偏差，期望 agent 基于实际取到的函数体审慎说明文件路径/归属校验逻辑，而非凭模板硬编。"
     },
-    "metadata": {"category": "file-access", "difficulty": "hard", "expected_max_iterations": 5}
+    "metadata": {
+      "category": "file-access",
+      "difficulty": "hard",
+      "expected_max_iterations": 5
+    }
   },
   {
     "input": {
@@ -118,14 +204,24 @@
       "user_id": 3
     },
     "expected_output": {
-      "root_cause_keywords": ["pcie", "拓扑", "设备"],
+      "root_cause_keywords": [
+        "pcie",
+        "拓扑",
+        "设备"
+      ],
       "expected_component": "pcie_device",
       "expected_citations": [],
-      "expected_tools": ["summarize_component"],
+      "expected_tools": [
+        "summarize_component"
+      ],
       "must_use_source": true,
       "reference_answer": "应先调 summarize_component 拿 pcie_device 概览（文件/符号规模、入口符号、大文件），再概括其职责：PCIe 卡带外管理、拓扑读取与设备加载等。"
     },
-    "metadata": {"category": "source-qa", "difficulty": "easy", "expected_max_iterations": 3}
+    "metadata": {
+      "category": "source-qa",
+      "difficulty": "easy",
+      "expected_max_iterations": 3
+    }
   },
   {
     "input": {
@@ -134,14 +230,24 @@
       "user_id": 3
     },
     "expected_output": {
-      "root_cause_keywords": ["pcie_oob_mgmt_init", "CAPABILITY", "opcode"],
+      "root_cause_keywords": [
+        "pcie_oob_mgmt_init",
+        "CAPABILITY",
+        "opcode"
+      ],
       "expected_component": "pcie_device",
       "expected_citations": [],
-      "expected_tools": ["search_symbols"],
+      "expected_tools": [
+        "search_symbols"
+      ],
       "must_use_source": true,
       "reference_answer": "应按符号名检索 pcie_oob_mgmt_init 的函数体，说明它通过 comm.get_info(chip_info, e_opcode.CAPABILITY) 获取能力 opcode 完成带外管理初始化，失败返回 false。"
     },
-    "metadata": {"category": "source-qa", "difficulty": "easy", "expected_max_iterations": 3}
+    "metadata": {
+      "category": "source-qa",
+      "difficulty": "easy",
+      "expected_max_iterations": 3
+    }
   },
   {
     "input": {
@@ -150,14 +256,22 @@
       "user_id": 3
     },
     "expected_output": {
-      "root_cause_keywords": ["pcie_device"],
+      "root_cause_keywords": [
+        "pcie_device"
+      ],
       "expected_component": "pcie_device",
       "expected_citations": [],
-      "expected_tools": ["get_errors_by_component"],
+      "expected_tools": [
+        "get_errors_by_component"
+      ],
       "must_use_source": false,
       "reference_answer": "应调日志工具统计各组件错误数，指出 pcie_device 的 'PCIe card oob management init failed' 为最高频错误（约每分钟一次）。"
     },
-    "metadata": {"category": "log-analysis", "difficulty": "easy", "expected_max_iterations": 3}
+    "metadata": {
+      "category": "log-analysis",
+      "difficulty": "easy",
+      "expected_max_iterations": 3
+    }
   },
   {
     "input": {
@@ -166,14 +280,22 @@
       "user_id": 3
     },
     "expected_output": {
-      "root_cause_keywords": ["索引", "未", "无法定位"],
+      "root_cause_keywords": [
+        "索引",
+        "未",
+        "无法定位"
+      ],
       "expected_component": "",
       "expected_citations": [],
       "expected_tools": [],
       "must_use_source": true,
       "reference_answer": "certificate 组件未在本用户构建源码索引（certificate_collection_ca.lua / operation_logger.lua 不在已索引组件中）。期望 agent 调源码工具命中『组件尚未构建源码索引』后如实告知需先建索引，绝不能编造该文件的函数体。"
     },
-    "metadata": {"category": "negative-ungrounded", "difficulty": "medium", "expected_max_iterations": 4}
+    "metadata": {
+      "category": "negative-ungrounded",
+      "difficulty": "medium",
+      "expected_max_iterations": 4
+    }
   },
   {
     "input": {
@@ -182,14 +304,22 @@
       "user_id": 3
     },
     "expected_output": {
-      "root_cause_keywords": ["索引", "未", "无法定位"],
+      "root_cause_keywords": [
+        "索引",
+        "未",
+        "无法定位"
+      ],
       "expected_component": "",
       "expected_citations": [],
       "expected_tools": [],
       "must_use_source": true,
       "reference_answer": "sms_proxy.lua 不在任何已索引组件中。期望 agent 检索源码无果后说明无法定位到源码，建议先为对应组件构建 AST 索引，而非编造函数体。"
     },
-    "metadata": {"category": "negative-ungrounded", "difficulty": "medium", "expected_max_iterations": 4}
+    "metadata": {
+      "category": "negative-ungrounded",
+      "difficulty": "medium",
+      "expected_max_iterations": 4
+    }
   },
   {
     "input": {
@@ -198,13 +328,983 @@
       "user_id": 3
     },
     "expected_output": {
-      "root_cause_keywords": ["索引", "未", "无法定位"],
+      "root_cause_keywords": [
+        "索引",
+        "未",
+        "无法定位"
+      ],
       "expected_component": "",
       "expected_citations": [],
       "expected_tools": [],
       "must_use_source": true,
       "reference_answer": "event_management.lua 不在已索引组件中。期望 agent 检索无果后如实告知无法从源码定位，提示先建索引，而非凭日志硬编根因。"
     },
-    "metadata": {"category": "negative-ungrounded", "difficulty": "medium", "expected_max_iterations": 4}
+    "metadata": {
+      "category": "negative-ungrounded",
+      "difficulty": "medium",
+      "expected_max_iterations": 4
+    }
+  },
+  {
+    "input": {
+      "question": "网卡固件升级在系统已下电（power_state=OFF）时走 SMBus 协议直接失败，日志报 'SMBus upgrade not allowed when system is powered off'，帮我从源码定位根因和修复方向。",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "PROTOCOL_NIC_SMBUS",
+        "power_state",
+        "OFF",
+        "RET.ERR"
+      ],
+      "expected_component": "network_adapter",
+      "expected_citations": [
+        "upgrade_process.lua:267"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "upgrade_process.lua:267 的升级前置校验：protocol==upgrade_defs.PROTOCOL_NIC_SMBUS 且 power_state=='OFF' 时 log:error 并 return RET.ERR。根因是 SMBus 升级要求系统上电；下电态应改用 SFC/SPI 协议缓存升级包等上电再激活，或先上电再走 SMBus。"
+    },
+    "metadata": {
+      "category": "nic-upgrade",
+      "difficulty": "easy",
+      "expected_max_iterations": 3
+    }
+  },
+  {
+    "input": {
+      "question": "特殊 PCIe 网卡（如 Mellanox）端口识别时日志抛 'match PCIePath.PortNum faild'，网口号取不到，根因在哪？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "get_special_pcie_network_port_num",
+        "PCIePath",
+        "match",
+        "PortNum",
+        "log:raise"
+      ],
+      "expected_component": "network_adapter",
+      "expected_citations": [
+        "handler_eth.lua:285"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "handler_eth.lua:283/285 的 get_special_pcie_network_port_num 用正则 ':(%w+).%w+%/[^/]+$' 从 BMA 上报的 PCIePath 末尾倒数第二级 BDF 提取端口号；PCIePath 格式不符导致匹配失败时 log:raise。根因是 BMA 上报的 PCIePath 格式与该网卡型号约定不一致；修复方向是放宽/适配 PCIePath 解析并对解析失败兜底。"
+    },
+    "metadata": {
+      "category": "nic-topology",
+      "difficulty": "medium",
+      "expected_max_iterations": 4
+    }
+  },
+  {
+    "input": {
+      "question": "PCIe 卡插拔事件没记录，日志出现 'card_plug_in_record failed ... obj is nil'，为什么插拔信息丢失？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "card_plug_in_record",
+        "obj is nil",
+        "position",
+        "type"
+      ],
+      "expected_component": "pcie_device",
+      "expected_citations": [
+        "plug_record_mgmt.lua:120"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "plug_record_mgmt.lua:118/120 的 card_plug_in_record(obj, position, type) 在 obj（卡的 MDS 对象）为 nil 时 log:error 并 return，无法记录该卡的 VID/DID/SN/PN。根因是上游未取得对应位置/类型的卡对象（连接器探测或对象创建失败）。"
+    },
+    "metadata": {
+      "category": "pcie-record",
+      "difficulty": "easy",
+      "expected_max_iterations": 3
+    }
+  },
+  {
+    "input": {
+      "question": "设置 PCIe 拓扑（MMIO/BDF）信息时报 'save_pcie_cfg_info failed'，配置无法持久化，根因是什么？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "save_pcie_topo_info",
+        "pcall",
+        "save_pcie_cfg_info",
+        "Segment",
+        "error"
+      ],
+      "expected_component": "pcie_device",
+      "expected_citations": [
+        "biz_topo_service.lua:546"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "biz_topo_service.lua:544/546 的 set_pcie_topo_info 用 pcall 包裹 save_pcie_topo_info 保存 GlobalSystemId/Segment/Socket/Bus/Device/Function 等 BDF 配置；保存抛异常被 pcall 捕获后 log:error 再 error() 返回 IPMI 错误码，导致 PCIe 地址配置持久化失败。"
+    },
+    "metadata": {
+      "category": "pcie-topology",
+      "difficulty": "medium",
+      "expected_max_iterations": 4
+    }
+  },
+  {
+    "input": {
+      "question": "存储侧加载 RAID 控制器/BBU/磁盘状态时全取不到，日志报 'dlopen ... failed' 或 'Unable to get Entry Point function address'，根因是什么？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "register_sml_adapter_fun",
+        "dlopen",
+        "dlsym",
+        "Entry Point",
+        "g_sml_base"
+      ],
+      "expected_component": "storage",
+      "expected_citations": [
+        "l_sml_adapter.cpp:88"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "l_sml_adapter.cpp:86/88/97 的 register_sml_adapter_fun：dlopen(sml_base_lib_path) 返回 nullptr，或随后 dlsym 取 sml_register_* 等函数入口失败，导致 SML 适配函数表未注册完整，后续无法访问 RAID 控制器/BBU/磁盘。根因是 SML 基础库文件缺失/路径错误或符号缺失（版本不匹配）。"
+    },
+    "metadata": {
+      "category": "storage-raid",
+      "difficulty": "medium",
+      "expected_max_iterations": 4
+    }
+  },
+  {
+    "input": {
+      "question": "获取设备 SDR 记录时一直报 'out of range'（OUT_OF_RANGE 完成码），请求的记录读不出来，怎么回事？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "get_sdr_record",
+        "recid",
+        "sdr_count",
+        "ERR_OUT_OF_RANGE",
+        "0xFFFF"
+      ],
+      "expected_component": "sensor",
+      "expected_citations": [
+        "sdr_management.lua:288"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "sdr_management.lua:287-289 的 get_sdr_record：当 recid~=0xFFFF 且 recid>sdr_count 时判定越界，log:error 后 error(ERR_OUT_OF_RANGE)。根因是请求的 Record ID 超出当前 SDR 记录总数。"
+    },
+    "metadata": {
+      "category": "sensor-sdr",
+      "difficulty": "medium",
+      "expected_max_iterations": 4
+    }
+  },
+  {
+    "input": {
+      "question": "删除 SDR 记录时日志报 'record ID ... not found in any group'，删除失败返回越界错误，但 ID 看着在范围内，为什么找不到？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "ipmi_delete_sdr",
+        "found",
+        "sdr_groups",
+        "not found in any group",
+        "ERR_OUT_OF_RANGE"
+      ],
+      "expected_component": "sensor",
+      "expected_citations": [
+        "sdr_management.lua:574"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "sdr_management.lua:573/574 的 ipmi_delete_sdr 按 group 逐段累减 recid 定位记录；遍历完所有分组 found 仍为 false 时 log:error 并 error(ERR_OUT_OF_RANGE)。根因通常是分组累计计数与传入 recid 不一致，或目标记录已不在任何 group。"
+    },
+    "metadata": {
+      "category": "sensor-sdr",
+      "difficulty": "hard",
+      "expected_max_iterations": 5
+    }
+  },
+  {
+    "input": {
+      "question": "设置传感器 mock 模拟值时报 'mock value ... is out of range'，提示应在 0~255 或 -128~127，模拟值设置失败，原因是什么？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "convert_normal_to_raw",
+        "value",
+        "255",
+        "analog",
+        "out of range"
+      ],
+      "expected_component": "sensor",
+      "expected_citations": [
+        "sensor_common.lua:174"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "sensor_common.lua:172-174 的 convert_normal_to_raw 用 SDR 的 M/B/RBExp 系数把正常值反算为单字节原始值；无符号(analog==0)且 value>255、或有符号超出 -128~127 时越界，log:error 返回 nil。根因是用户给的模拟目标值换算后超出该传感器原始量程。"
+    },
+    "metadata": {
+      "category": "sensor-ipmi",
+      "difficulty": "medium",
+      "expected_max_iterations": 4
+    }
+  },
+  {
+    "input": {
+      "question": "获取某传感器换算系数(factors)时报 'sensor ... is not threshold sensor'，命令返回错误读不到系数，为什么？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "ipmi_get_sensor_factors",
+        "sensor_clz",
+        "ThresholdSensor",
+        "ERR_CANNOT_RESPONSE"
+      ],
+      "expected_component": "sensor",
+      "expected_citations": [
+        "sensor_management.lua:109"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "sensor_management.lua:108/109 的 ipmi_get_sensor_factors：取到的传感器对象 sensor_clz~='ThresholdSensor'（非门限型如离散传感器没有线性换算系数）时 log:error 并 error(ERR_CANNOT_RESPONSE)。根因是对非门限传感器请求 Get Sensor Factors 本不支持。"
+    },
+    "metadata": {
+      "category": "sensor-ipmi",
+      "difficulty": "easy",
+      "expected_max_iterations": 3
+    }
+  },
+  {
+    "input": {
+      "question": "电源固件升级时某电源一直失败，日志报 input loss state，根因是什么？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "LossOfInput",
+        "upgrade_psu",
+        "SUPPLY_3",
+        "input loss"
+      ],
+      "expected_component": "power_mgmt",
+      "expected_citations": [
+        "power_upgrade.lua:160"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "power_upgrade.lua:159-161 的 upgrade_one_psu：升级前检查 psu_obj.LossOfInput~=0（该电源失去交流输入）就 log:error 并 return fw_def.SUPPLY_3 中止，不下发固件。根因是该电源交流输入丢失，升级前置条件不满足。"
+    },
+    "metadata": {
+      "category": "power-upgrade",
+      "difficulty": "easy",
+      "expected_max_iterations": 3
+    }
+  },
+  {
+    "input": {
+      "question": "通过 IPMI 设置电源休眠模式一直失败，日志显示 sleep mode is incorrect、参数超范围，怎么回事？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "set_psu_sleep_mode",
+        "SLEEP_MODE",
+        "ParmOutOfRange",
+        "sleep mode"
+      ],
+      "expected_component": "power_mgmt",
+      "expected_citations": [
+        "power_ipmi.lua:219"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "power_ipmi.lua:217-219 的 set_psu_sleep_mode：从 req.Data 解出 sleep_mode 后白名单校验，只接受 SLEEP_MODE.Normal/DeepSleep，其它值 log:error 并 return ParmOutOfRange。根因是 IPMI 请求携带的休眠模式值不在允许枚举内。"
+    },
+    "metadata": {
+      "category": "power-ipmi",
+      "difficulty": "medium",
+      "expected_max_iterations": 4
+    }
+  },
+  {
+    "input": {
+      "question": "电源电容寿命预测没结果，日志报 life prediction count index 与 expected index 不一致，为什么不预测了？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "predicted_lifespan",
+        "model_index",
+        "index",
+        "E_FAILED",
+        "dod_level"
+      ],
+      "expected_component": "power_mgmt",
+      "expected_citations": [
+        "capacitor_mgmt.lua:350"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "capacitor_mgmt.lua:347-350 的 predicted_lifespan：按 dod/freq/temp 档位算出期望 model_index 与电源上报 index 比对，不一致即 log:error 并 return E_FAILED 放弃预测。根因是电源上报的寿命档位索引与本地模型期望档位不匹配（档位上报错位/不同步）。"
+    },
+    "metadata": {
+      "category": "power-capacitor",
+      "difficulty": "hard",
+      "expected_max_iterations": 5
+    }
+  },
+  {
+    "input": {
+      "question": "某风扇转速一直对不上，监控报风扇转速异常，real 转速与期望 PWM 对应转速差很多，怎么回事？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "scan_fan_status",
+        "low_speed",
+        "high_speed",
+        "FAN_STATUS_ERROR_COUNT",
+        "real_speed"
+      ],
+      "expected_component": "thermal_mgmt",
+      "expected_citations": [
+        "fan_object.lua:794"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "fan_object.lua:772-794 的 scan_fan_status：按目标转速和偏差算出允许区间 [low_speed,high_speed]，实测 real_speed 连续越界且 error_count>FAN_STATUS_ERROR_COUNT(5) 后置 STATUS_ERROR 并 log:error。根因是风扇实际转速持续偏离期望 PWM 对应目标转速（风扇老化/卡阻/调速失效）。"
+    },
+    "metadata": {
+      "category": "thermal-fan",
+      "difficulty": "medium",
+      "expected_max_iterations": 4
+    }
+  },
+  {
+    "input": {
+      "question": "热管理下发目标温度调速策略不生效，日志报 'Can not find cooling area for requirement'，策略没下到 PID，根因是什么？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "add_target_policy_to_pid",
+        "requirement_area_map",
+        "req_base_id",
+        "cooling area"
+      ],
+      "expected_component": "thermal_mgmt",
+      "expected_citations": [
+        "cooling_pid_intf.lua:114"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "cooling_pid_intf.lua:112/114 的 add_target_policy_to_pid 用 requirement 的 REQ_BASE_ID 查 requirement_area_map 取所属散热域 area_id；映射表查不到（nil）即 log:error 返回 nil 跳过该策略，目标调速配置下不到 PID。根因是 requirement 与 cooling area 的映射配置缺失/不匹配。"
+    },
+    "metadata": {
+      "category": "thermal-cooling",
+      "difficulty": "hard",
+      "expected_max_iterations": 5
+    }
+  },
+  {
+    "input": {
+      "question": "通过 IPMI 设置机箱指示灯颜色失败，日志报 led color out of range，为什么颜色设不上？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "set_led_by_ipmi",
+        "target_color",
+        "led_color.WHITE",
+        "out of range",
+        "RET.ERR"
+      ],
+      "expected_component": "chassis",
+      "expected_citations": [
+        "led_service.lua:567"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "led_service.lua:566/567 的 set_led_by_ipmi：解析出 target_color 后做上界校验 target_color>led_color.WHITE(=6) 即 log:error 并 return RET.ERR。根因是 IPMI 请求传入了超出支持范围的非法颜色码。"
+    },
+    "metadata": {
+      "category": "chassis-led",
+      "difficulty": "easy",
+      "expected_max_iterations": 3
+    }
+  },
+  {
+    "input": {
+      "question": "导入 BIOS 配置时报 'json format error' / MalformedJSON，配置导入直接失败，根因是什么？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "get_config",
+        "json.decode",
+        "MalformedJSON",
+        "bmc_config_json"
+      ],
+      "expected_component": "bios",
+      "expected_citations": [
+        "export_import_engine.lua:146"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "export_import_engine.lua:142-146 的 get_config 用 pcall 包裹 json.decode(config_string)；解析失败或解码结果为 nil 时 error(base_messages.MalformedJSON())，导入流程一开始就中断。根因是上传的 BIOS 配置内容本身 JSON 格式非法。"
+    },
+    "metadata": {
+      "category": "bios-config",
+      "difficulty": "easy",
+      "expected_max_iterations": 3
+    }
+  },
+  {
+    "input": {
+      "question": "BIOS 升级准备阶段报 'chown cfg file failed' / 'chown hpm file failed'，升级准备直接返回错误，为什么？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "upgrade_prepare_callback",
+        "PFileFileChown",
+        "chown cfg file failed",
+        "REPLY_ERR",
+        "secbox"
+      ],
+      "expected_component": "bios",
+      "expected_citations": [
+        "signal.lua:319"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "signal.lua:317-327 的 upgrade_prepare_callback 把配置文件与 hpm 升级文件属主改为 secbox(uid/gid 104)；任一 client:PFileFileChown 返回 not ok 即 log:error('chown cfg/hpm file failed') 并以 REPLY_ERR 回复 PrepareReply 后 return。根因是文件属主变更到 104:104 失败（权限/路径/secbox 环境问题）。"
+    },
+    "metadata": {
+      "category": "bios-upgrade",
+      "difficulty": "medium",
+      "expected_max_iterations": 4
+    }
+  },
+  {
+    "input": {
+      "question": "写入产品资产标签(AssetTag)时报 'Input ... invalid' 并提示 'Write fru E-label data failed'，操作失败是什么原因？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "SetProductAssetTag",
+        "validate_byte",
+        "assettag",
+        "invalid",
+        "InternalError"
+      ],
+      "expected_component": "frudata",
+      "expected_citations": [
+        "frudata_app.lua:206"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "frudata_app.lua:201-207 的 SetProductAssetTag 先用 common.validate_byte(3,5,assettag) 校验资产标签字符合法性；含非法字符返回 false 时 log:error('Input %s invalid') 并 error(InternalError())，写入根本未执行。根因是传入的资产标签含非法字符。"
+    },
+    "metadata": {
+      "category": "fru-elabel",
+      "difficulty": "easy",
+      "expected_max_iterations": 3
+    }
+  },
+  {
+    "input": {
+      "question": "调用电源控制(PowerCtrl/system_reset)时报 'FruID is out of range' 并返回失败，电源动作不执行，为什么？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "system_reset",
+        "fru_id",
+        "GlobalDomain",
+        "OS",
+        "RetValue.ERR"
+      ],
+      "expected_component": "fructrl",
+      "expected_citations": [
+        "powerapi.lua:218"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "powerapi.lua:217-220 的 cpower_api:system_reset 从 ctx['fru_id'] 取目标 id，只允许 m_enums.FruId.GlobalDomain 或 OS；否则 log:error('FruID is out of range') 并 return RetValue.ERR。根因是请求携带的 fru_id 不在合法域范围内。"
+    },
+    "metadata": {
+      "category": "fru-power",
+      "difficulty": "medium",
+      "expected_max_iterations": 4
+    }
+  },
+  {
+    "input": {
+      "question": "mp2882 VRD 升级解析固件文件时报 'read_data_from_data_file failed, line exceed limit 3072'，升级失败，根因是什么？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "read_data_from_data_file",
+        "MP2882_MTP_SIZE",
+        "line exceed limit",
+        "END_FLAG"
+      ],
+      "expected_component": "general_hardware",
+      "expected_citations": [
+        "mp2882_pmbus.lua:191"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "mp2882_pmbus.lua:190/191 的 read_data_from_data_file 逐行累加 line，正常遇 END_FLAG 结束；在 line 超过 MP2882_MTP_SIZE(=3072，芯片 MTP 行数上限)前未遇 END 即判定 line exceed limit 并 break 返回 RET.ERR。根因是固件文件行数超 MTP 容量（文件损坏/格式错误/缺 END 标志或固件与该芯片不匹配）。"
+    },
+    "metadata": {
+      "category": "hw-vrd-upgrade",
+      "difficulty": "easy",
+      "expected_max_iterations": 3
+    }
+  },
+  {
+    "input": {
+      "question": "网卡的位置/槽位(Position/SlotNumber)或设备名一直为空、对不上，要先排查 network_adapter 还是 pcie_device？这是跨组件的问题吗？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "PCIE_DEVICE_INTERFACE",
+        "bmc.dev.PCIeDevice",
+        "get_device_name",
+        "Location",
+        "Slot"
+      ],
+      "expected_component": "pcie_device",
+      "expected_citations": [
+        "card_mgmt.lua:515",
+        "card_mgmt.lua:326"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "跨组件定位：报错代码在 network_adapter——card_mgmt.lua:326 命中 PCIE_DEVICE_INTERFACE('bmc.dev.PCIeDevice')+prop=='Location' 做属性映射，card_mgmt.lua:512/515 的 get_device_name 经 mdb 取 pcie 设备对象失败时 log:error，导致 Location→Position、Slot→SlotNumber、DeviceName 全拿不到。根因在 pcie_device 侧 bmc.dev.PCIeDevice 对该卡的建模(Location/Slot/DeviceName)未就绪。代码修改方案：①主修 pcie_device——卡上电/枚举后及时建 PCIeDevice 对象并填齐 Location/Slot/DeviceName；②network_adapter 侧 card_mgmt.lua:515 容错——取不到对象时订阅 bmc.dev.PCIeDevice 对象创建/属性变更信号做延迟回填并退避重试，避免一次性失败导致位置/名称长期为空。"
+    },
+    "metadata": {
+      "category": "xc-nic-pcie",
+      "difficulty": "medium",
+      "expected_max_iterations": 5,
+      "cross_component": true,
+      "components": [
+        "network_adapter",
+        "pcie_device"
+      ],
+      "mdb_interface": "bmc.dev.PCIeDevice"
+    }
+  },
+  {
+    "input": {
+      "question": "PCIe 卡资源树里网卡的 FirmwareVersion 同步不上(显示为空/旧值)，日志 '[device_mgmt_pcie_card] Synchronization failed'，应该查哪个组件？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "PROP_TABLE",
+        "bmc.dev.NetworkAdapter",
+        "FirmwareVersion",
+        "sync_dev_prop_to_resource_obj",
+        "Synchronization failed"
+      ],
+      "expected_component": "network_adapter",
+      "expected_citations": [
+        "pcie_card_mgmt.lua:249",
+        "pcie_card_mgmt.lua:151"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "跨组件定位：报错代码在 pcie_device——pcie_card_mgmt.lua:151 的 PROP_TABLE['bmc.dev.NetworkAdapter'] 把网卡 FirmwareVersion 映射到 PCIe 卡资源对象，sync_dev_prop_to_resource_obj 经 mdb 读取并重试 100 次仍 ok=false，pcie_card_mgmt.lua:249 log:notice 'Synchronization failed'。根因在 network_adapter 未上报/未就绪 bmc.dev.NetworkAdapter 的 FirmwareVersion。代码修改方案：①主修 network_adapter——固件读取完成后及时上报 NetworkAdapter 对象的 FirmwareVersion；②pcie_device 侧 pcie_card_mgmt.lua:249 改进——同步失败应升级日志等级(notice→warning)并改为订阅 FirmwareVersion 属性变更信号做增量同步，而非阻塞式重试 100 次后静默放弃。"
+    },
+    "metadata": {
+      "category": "xc-pcie-nic",
+      "difficulty": "hard",
+      "expected_max_iterations": 5,
+      "cross_component": true,
+      "components": [
+        "pcie_device",
+        "network_adapter"
+      ],
+      "mdb_interface": "bmc.dev.NetworkAdapter"
+    }
+  },
+  {
+    "input": {
+      "question": "RAID 控制器的序列号(SN)/PCIe 链路宽度(LinkWidth)读不到或为 0xff，存储侧拿不到控制器 PCIe 信息，根因在哪个组件？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "fill_ctrl_basic_info",
+        "pcie_device_iface_proxy",
+        "bmc.dev.PCIeDevice",
+        "LinkWidth",
+        "pcie_link_width"
+      ],
+      "expected_component": "pcie_device",
+      "expected_citations": [
+        "ctrl.cpp:211",
+        "ctrl.cpp:193"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "跨组件定位：报错代码在 storage——ctrl.cpp:193 的 fill_ctrl_basic_info 用 make_proxy<pcie_device_iface_proxy>(ctrl_proxy.h:27 声明 'bmc.dev.PCIeDevice')对控制器路径建代理读 SerialNumber/PartNumber/LinkWidth；pcie_device 侧未提供该接口(proxy 为空)或 LinkWidth 非 'xN' 格式时 SN 不写、ctrl.cpp:211 把 pcie_link_width 置 0xff。根因在 pcie_device 对该 RAID 控制器的 bmc.dev.PCIeDevice/.Bandwidth 建模与上报缺失。代码修改方案：①主修 pcie_device——为 RAID 控制器节点建齐 PCIeDevice/Bandwidth 接口并规范 LinkWidth 为 'xN' 格式；②storage 侧 ctrl.cpp:193/211 容错——proxy 取空时记录可诊断日志并保留上次有效值，把 0xff 作为'未知'显式标识而非静默写入。"
+    },
+    "metadata": {
+      "category": "xc-storage-pcie",
+      "difficulty": "hard",
+      "expected_max_iterations": 5,
+      "cross_component": true,
+      "components": [
+        "storage",
+        "pcie_device"
+      ],
+      "mdb_interface": "bmc.dev.PCIeDevice"
+    }
+  },
+  {
+    "input": {
+      "question": "网卡资源整体加载不出来(以太/光纤/IB 接口都没有)，日志反复 'load bma mdb objects failed ... skip'，是不是 BMA 主机代理服务不可用？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "HOST_AGENT_APP",
+        "bmc.kepler.host_agent",
+        "GetManagedObjects",
+        "MAX_FAILED_COUNT",
+        "ServiceUnknown"
+      ],
+      "expected_component": "network_adapter",
+      "expected_citations": [
+        "bma_mdb_mgmt.lua:131",
+        "bma_mdb_mgmt.lua:121"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "跨组件/跨服务定位：报错代码在 network_adapter——load_all_bma_resource 经 mdb 调 BMA 主机代理 bmc.kepler.host_agent 的 ObjectManager.GetManagedObjects；bma_mdb_mgmt.lua:121 命中 'org.freedesktop.DBus.Error.ServiceUnknown'(服务未起)，或同一路径连续失败超过 MAX_FAILED_COUNT(=3)时 bma_mdb_mgmt.lua:131 log:error '...skip' 放弃该子树，网卡接口资源加载不全。根因在 BMA(host_agent) 服务不可用/未就绪——该服务为外部依赖，不在本用户已索引组件内，只能在调用侧定位到代码并指认诱因。代码修改方案：①运维侧——排查并拉起 bmc.kepler.host_agent(BMA)服务，确认其 ObjectManager 正常；②network_adapter 侧 bma_mdb_mgmt.lua——对 ServiceUnknown 改为订阅服务上线信号后重新加载、对单路径失败加退避重试而非直接 skip，避免 BMA 晚启动导致资源永久缺失。"
+    },
+    "metadata": {
+      "category": "xc-nic-bma",
+      "difficulty": "hard",
+      "expected_max_iterations": 5,
+      "cross_component": true,
+      "components": [
+        "network_adapter",
+        "host_agent"
+      ],
+      "mdb_interface": "bmc.kepler.host_agent"
+    }
+  },
+  {
+    "input": {
+      "question": "热管理建完风扇对象后，资源树里风扇转速(FrontSpeed/RearSpeed)、PWM、在位/状态一直为空或不更新，仪表盘读不到风扇数据，怎么回事？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "DEV_FAN_METRICS_INTERFACE",
+        "synchronize_property",
+        "try_get_object",
+        "get_property",
+        "FrontSpeed"
+      ],
+      "expected_component": "thermal_mgmt",
+      "expected_citations": [
+        "thermal_dev_comm_fun.lua:217",
+        "fan_dev_mgmt.lua:201"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "跨组件定位：报错代码在 thermal_mgmt——fan_dev_mgmt.lua:201 的 synchronize_property 经 mdb 从风扇设备接口 bmc.dev.Fan/.Status/.Metrics(thermal_dev_defs.lua:33)拉转速/PWM/状态；设备对象缺失(try_get_object 返回 nil)或属性读取失败(get_property 非0)时 thermal_dev_comm_fun.lua:217 log:error，资源树风扇数据为空。根因在 bmc.dev.Fan 设备模型提供方(设备发现/驱动层)未上报对象或属性，提供方不在本用户已索引组件内，只能在 thermal_mgmt 侧定位代码并指认诱因。代码修改方案：①主修设备层——风扇上电后确保 bmc.dev.Fan/.Metrics 对象及属性及时建模上报；②thermal_mgmt 侧 thermal_dev_comm_fun.lua:198/217 容错——对象/属性未就绪时订阅对象创建与属性变更信号做延迟同步并退避重试，而非单次拉取失败即留空。"
+    },
+    "metadata": {
+      "category": "xc-thermal-fan",
+      "difficulty": "medium",
+      "expected_max_iterations": 5,
+      "cross_component": true,
+      "components": [
+        "thermal_mgmt",
+        "devmon"
+      ],
+      "mdb_interface": "bmc.dev.Fan.Metrics"
+    }
+  },
+  {
+    "input": {
+      "question": "电源管理检测到 PSU 插入后资源树始终建不出 OnePower 对象，日志反复 'get psu object failed' 或 'get SlotNumber failed'，电源的输入电压/功率/状态全读不到，原因是什么？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "DEV_PSU_INTERFACE",
+        "bmc.dev.PowerSupply",
+        "try_get_object",
+        "SlotNumber",
+        "get psu object failed"
+      ],
+      "expected_component": "power_mgmt",
+      "expected_citations": [
+        "power_dev_mgmt.lua:184",
+        "power_dev_mgmt.lua:190"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "跨组件定位：报错代码在 power_mgmt——on_device_added 经 mdb 调电源设备接口 bmc.dev.PowerSupply(power_dev_defs.lua:16)取对象(power_dev_mgmt.lua:182)并读 SlotNumber；对象未就绪时 power_dev_mgmt.lua:184 'get psu object failed'、SlotNumber 读失败时 :190 'get SlotNumber failed'，OnePower 对象不创建，输入电压/功率/状态全空。根因在 bmc.dev.PowerSupply 设备模型提供方(设备发现/驱动层)未上报对象/SlotNumber，提供方不在本用户已索引组件内。代码修改方案：①主修设备层——PSU 插入后及时建 PowerSupply 对象并填 SlotNumber；②power_mgmt 侧 power_dev_mgmt.lua:182-190 容错——订阅对象/属性就绪信号后再建 OnePower，并对 SlotNumber 缺失加退避重试，避免 PSU 数据长期缺失。"
+    },
+    "metadata": {
+      "category": "xc-power-psu",
+      "difficulty": "medium",
+      "expected_max_iterations": 5,
+      "cross_component": true,
+      "components": [
+        "power_mgmt",
+        "devmon"
+      ],
+      "mdb_interface": "bmc.dev.PowerSupply"
+    }
+  },
+  {
+    "input": {
+      "question": "热管理拿不到入风口/出风口温度，门限传感器对象报 'Get object failed'，inlet/outlet 温度取到 nil，温度调速诊断数据缺失，为什么 thermal 读不到温度传感器数据？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "ThresholdSensor",
+        "FOREACH_FUNC",
+        "get_obj_info_by_interface",
+        "inlet_temp",
+        "Get object"
+      ],
+      "expected_component": "sensor",
+      "expected_citations": [
+        "base.lua:193",
+        "threshold_sensor_data_keeping.lua:29"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "跨组件定位：报错代码在 thermal_mgmt——data_keeping 同步门限传感器服务接口 bmc.kepler.Systems.ThresholdSensor(.Display)(threshold_sensor_data_keeping.lua:29)，经 base 的 FOREACH_FUNC 跨组件向 sensor 取对象，取不到则 base.lua:193 log:error 'Get object failed' 并 return，越限回调里 inlet_temp/outlet_temp 取到 nil。根因在 sensor 组件提供的 ThresholdSensor 对象未就绪或 Display 属性缺失。代码修改方案：①主修 sensor——确保入/出风口门限传感器对象及 Reading/Display 属性正常建模上报；②thermal_mgmt 侧 base.lua:193 / threshold_sensor_data_keeping.lua 容错——取对象失败时订阅对象创建信号延迟纳管，inlet/outlet 取空时跳过本轮调速而非按 nil 计算，避免温度调速诊断数据缺失。"
+    },
+    "metadata": {
+      "category": "xc-thermal-sensor",
+      "difficulty": "hard",
+      "expected_max_iterations": 5,
+      "cross_component": true,
+      "components": [
+        "thermal_mgmt",
+        "sensor"
+      ],
+      "mdb_interface": "bmc.kepler.Systems.ThresholdSensor"
+    }
+  },
+  {
+    "input": {
+      "question": "通过制造接口查询某 CPU 板(fruid 非 0)的 BIOS 版本返回为空，日志出现 'get cpuboard object failed'，manufacture 为什么拿不到 BIOS 版本？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "CPUBOARD_INTERFACE",
+        "try_get_object",
+        "BIOSVersion",
+        "get cpuboard object failed",
+        "CpuBoard"
+      ],
+      "expected_component": "general_hardware",
+      "expected_citations": [
+        "function_get_version.lua:236",
+        "function_get_version.lua:234"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "跨组件定位：报错代码在 manufacture——function_get_version.lua:40 定义 CPUBOARD_INTERFACE='bmc.kepler.Systems.Board.CpuBoard'，:234 经 mdb.try_get_object 取 general_hardware 提供的 CpuBoard 对象读 BIOSVersion；对象未就绪/路径取不到时 pcall 失败，:236 log:error('get cpuboard object failed')，返回空版本。根因在 general_hardware 的 CpuBoard 对象(bmc.kepler.Systems.Board.CpuBoard，见其 mds/model.json)不可达。代码修改方案：①主修 general_hardware——CPU 板在位时确保 CpuBoard 对象及 BIOSVersion 属性正常上报；②manufacture 侧 function_get_version.lua:233-236 容错——取对象失败时重试/订阅就绪信号，并返回明确的'暂不可用'而非空串，便于上层区分'无该板'与'板存在但未就绪'。"
+    },
+    "metadata": {
+      "category": "xc-manufacture-hw",
+      "difficulty": "medium",
+      "expected_max_iterations": 5,
+      "cross_component": true,
+      "components": [
+        "manufacture",
+        "general_hardware"
+      ],
+      "mdb_interface": "bmc.kepler.Systems.Board.CpuBoard"
+    }
+  },
+  {
+    "input": {
+      "question": "BIOS 生成 SMBIOS/丝印文件时拿到的 PCIe 设备(silk)信息为空，导致 PCIe/SAS 槽位丝印缺失，根因在哪个组件？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "PCIE_DEVICE_SERVICE_NAME",
+        "bmc.kepler.pcie_device",
+        "get_object_list",
+        "PcieAddrInfo",
+        "object_service"
+      ],
+      "expected_component": "pcie_device",
+      "expected_citations": [
+        "bios_object_mutihost.lua:132",
+        "object_service.lua:34"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "跨组件定位：调用代码在 bios——bios_object_mutihost.lua:132 经 object_service:get_object_list 以服务名 bmc.kepler.pcie_device(object_def.lua 的 PCIE_DEVICE_SERVICE_NAME)，再由 object_service.lua:34 bus:call(GetAll)跨组件拉 .../PCIeDevices/PcieAddrInfo 对象缓存 PCIe 丝印；pcie_device 服务未起或对象未建模时对象列表为空，bios 的 pcie_info/sas_info 为空，SMBIOS/丝印缺失。根因在被依赖的 pcie_device 组件未提供 PcieAddrInfo 对象。代码修改方案：①主修 pcie_device——拓扑就绪后确保 PcieAddrInfo 对象建模可查；②bios 侧 bios_object_mutihost.lua:132 容错——对象列表为空时不生成空丝印，而是延迟到 pcie_device 就绪后由信号触发重建，避免一次性生成残缺 SMBIOS。"
+    },
+    "metadata": {
+      "category": "xc-bios-pcie",
+      "difficulty": "medium",
+      "expected_max_iterations": 5,
+      "cross_component": true,
+      "components": [
+        "bios",
+        "pcie_device"
+      ],
+      "mdb_interface": "bmc.kepler.pcie_device"
+    }
+  },
+  {
+    "input": {
+      "question": "general_hardware 监听到 GPU/Processor 设备但资源树对象(InventorySerialNumber/Manufacturer 等)同步不上、属性为空，根因可能在哪个组件？",
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 3
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "synchronize_property",
+        "MACA_SERVICE",
+        "bmc.kepler.maca",
+        "GetObject",
+        "bmc.dev.Processor"
+      ],
+      "expected_component": "general_hardware",
+      "expected_citations": [
+        "gpu_mgmt.lua:203",
+        "gpu_mgmt.lua:196"
+      ],
+      "expected_tools": [
+        "gather_code_context"
+      ],
+      "must_use_source": true,
+      "reference_answer": "跨组件/跨服务定位：报错代码在 general_hardware——gpu_mgmt.lua:196 的 synchronize_property 经 bus:call 到 bmc.kepler.maca 的 GetObject(comm_defs.lua:30 MACA_SERVICE)解析设备树接口(bmc.dev.PCIeDevice/Processor/Gpu)所在服务，再 GetAll 取属性同步到资源树；maca 的 GetObject 返回 nil 时 gpu_mgmt.lua:203 'if not ret then' 直接 return，InventorySerialNumber/Manufacturer 等属性保持空。根因在 maca 设备树中介服务/设备对象不可达——maca 为外部服务，不在本用户已索引组件内，只能在 general_hardware 侧定位代码并指认诱因。代码修改方案：①运维/设备层——排查 bmc.kepler.maca 服务及设备树对象是否就绪；②general_hardware 侧 gpu_mgmt.lua:196-203 健壮性——GetObject 返回 nil 时订阅 maca 就绪/设备上线信号后重新同步并退避重试，避免 maca 晚就绪导致 GPU/Processor 资源属性长期为空。"
+    },
+    "metadata": {
+      "category": "xc-hw-maca",
+      "difficulty": "hard",
+      "expected_max_iterations": 5,
+      "cross_component": true,
+      "components": [
+        "general_hardware",
+        "maca"
+      ],
+      "mdb_interface": "bmc.kepler.maca"
+    }
   }
 ]

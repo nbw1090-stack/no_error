@@ -1,0 +1,1041 @@
+[
+  {
+    "input": {
+      "question": "我给 Riser 上的 PCIe 卡（MCU 7bit 地址 0x30）配好了 CSR，能加载 Chip_MCU，但用 hwproxy 的 bmc.kepler.Chip.BlockIO 的 WriteRead/ComboWriteRead 读写就报错。这两个接口该怎么正确使用？怎么定位读写失败？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "Address",
+        "AddrWidth",
+        "OffsetWidth",
+        "ComboWriteRead",
+        "WriteRead"
+      ],
+      "expected_area": "hwproxy/chip",
+      "reference_answer": "先确认 Chip 对象配置正确：Address 要填 8bit 值（0x30 对应 48），AddrWidth/OffsetWidth 按实际地址和偏移宽度配 1~4 字节。WriteRead 在固定偏移(0xffffffff)先写后读；ComboWriteRead 在指定偏移先写后读。可用 busctl/mdbctl call ... bmc.kepler.Chip.BlockIO ComboWriteRead，req_cmd 取 0x20、rsp_cmd 取 0x21，rsp_len 不足补 0xff、超出截断。读写报错可用 ret_code=(reg_value&0xFA)|0x100 反算寄存器值判断错误类型（ACK 校验错、总线读写出错多为硬件链路不通），并核对 hwproxy topology.txt 中总线 id 与 i2ctransfer 一致。"
+    },
+    "metadata": {
+      "category": "hardware-debug",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 293,
+      "topic_title": "PCIe插卡的I2C读写怎么调试",
+      "topic_url": "https://discuss.openubmc.cn/t/293",
+      "has_accepted_answer": true,
+      "answer_author": "WeliveWelove_8cth9"
+    }
+  },
+  {
+    "input": {
+      "question": "openUBMC 的品牌包/白牌包怎么定制（图片、网页风格、配置）？定制之后又怎么恢复成默认配置？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "白牌包",
+        "hpm",
+        "web_custom.xml",
+        "清白牌包",
+        "manifest.yml"
+      ],
+      "expected_area": "branding",
+      "reference_answer": "品牌包本质是个 hpm 包，通过固件升级实现定制，可定制图片(favicon/login/logo)、风格(style_config.json)、配置(web_custom.xml)。manifest.yml 的 repo.files 记录要打包的文件，相对路径会去 repo 仓提取；manifest.yml 放在 manifest 仓 build/product/BMC/openUBMC/。用 bmcgo/bingo publish -z <编码> -b <机型> 制包。要恢复默认就再出一个用默认配置(web_custom.xml 默认值)的白牌包，即“清白牌包”。"
+    },
+    "metadata": {
+      "category": "branding",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 355,
+      "topic_title": "openUBMC品牌包定制指南",
+      "topic_url": "https://discuss.openubmc.cn/t/355",
+      "has_accepted_answer": true,
+      "answer_author": "Lexuan_Li"
+    }
+  },
+  {
+    "input": {
+      "question": "25.03 的 bios 组件执行 bmcgo test 报错，提示组件 requirement 被 override、找不到组件版本，其他组件也类似。怎么解决？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "bingo test",
+        "hw.ibmc.release",
+        "openUBMC.release",
+        "lua-format",
+        "conan"
+      ],
+      "expected_area": "build-env",
+      "reference_answer": "bmcgo 默认配的 remote 是 hw.ibmc.release，bingo 默认是 openUBMC.release；测试社区组件请改用 bingo test（如 bingo test -r openubmc_dev -it -ut）。若提示 reference is not a tree，是因为从 gitcode 下的 tar/zip 包不含 git 提交记录，需在组件目录 git init/commit 或重新 git clone。还要 apt remove/dpkg -P hw-ibmc-bmcgo 移除旧 bmcgo deb 包，并装最新 bingo。构建 mdb_interface 报 Cannot found lua-format 时把 lua-format 从 /usr/local/bin 拷到 /usr/bin。"
+    },
+    "metadata": {
+      "category": "build-env",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 466,
+      "topic_title": "25.03发行版BIOS组件中执行bmcgo test命令失败",
+      "topic_url": "https://discuss.openubmc.cn/t/466",
+      "has_accepted_answer": true,
+      "answer_author": "Larry_Li"
+    }
+  },
+  {
+    "input": {
+      "question": "我用 2503 dockerfile 做的镜像构建时，下载 flatbuffers 报 wget 错误（像是访问了内部地址）。怎么绕过？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "task_install_flatbuffers.py",
+        "flatbuffers",
+        "wget",
+        "flatc"
+      ],
+      "expected_area": "build-env",
+      "reference_answer": "bingo 的 tasks/task_install_flatbuffers.py 里写死了 flatbuffers 下载地址（内部地址外部访问不到）。改掉该文件里的下载地址为公网地址(github v2.0.0.tar.gz)即可正常构建；或因为社区开源组件并不依赖 flatbuffers，可把该脚本里 `flatc is not None` 改成 True 跳过安装。注意不要清空 ~/.conan/data，否则会丢失镜像预装的 conan 依赖。"
+    },
+    "metadata": {
+      "category": "build-env",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 485,
+      "topic_title": "通过dockerfile创建镜像后，构建时出现wget错误",
+      "topic_url": "https://discuss.openubmc.cn/t/485",
+      "has_accepted_answer": true,
+      "answer_author": "yizhonghui"
+    }
+  },
+  {
+    "input": {
+      "question": "怎么在 Qemu 里快速把 openUBMC 跑起来？跑起来后默认账号是什么、怎么替换 CSR 文件验证？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "manifest",
+        "config.json",
+        "Administrator",
+        "killall skynet",
+        "Connector Presence"
+      ],
+      "expected_area": "qemu",
+      "reference_answer": "下载最新 manifest，在 build/works/packet/qemu_shells/config.json 里配置（体验可用默认），执行 vemake 脚本一键拉起，docker ps -a 看容器、docker attach <容器ID> 进串口。默认账号 Administrator / Admin@90000。替换 CSR：ssh -p 10022 上传 csr 到 /tmp，telnet 进去 mv 到 /opt/bmc/sr，再用 mdbctl 把对应 Connector 的 Presence 设 0 再设 1 触发卸载/重载，或直接替换后 killall skynet 重新加载。Qemu 当前不支持固件升级。"
+    },
+    "metadata": {
+      "category": "qemu",
+      "difficulty": "easy",
+      "source": "openubmc-forum",
+      "topic_id": 544,
+      "topic_title": "如何快速启动Qemu",
+      "topic_url": "https://discuss.openubmc.cn/t/544",
+      "has_accepted_answer": false,
+      "answer_author": "fanxinxin(OP)"
+    }
+  },
+  {
+    "input": {
+      "question": "OS 侧装好 iBMA 2.13 并启动了服务，但 openUBMC 的 BMA 管理界面不显示版本等信息，是什么原因、怎么解决？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "iBMA",
+        "webui",
+        "https",
+        "manifest.yml",
+        "404"
+      ],
+      "expected_area": "ibma",
+      "reference_answer": "信息栏空说明 BMC 与 iBMA 通信失败。解决需三处：1) webui 组件把若干 url 里的 BMA 改成 iBMA（mock/ibma/ibma.ts、src/api/reqPath.ts、ibma.server.ts 等，否则 F12 会看到 BMA 相关 url 404）；2) 改 manifest 组件的 manifest.yml；3) iBMA 升级到最新版本(2.16.x)。同时 OS 侧 iBMA 需开 https：ibmacli conf modify -n iBMA.ini -a iBMA_System.iBMA_support_https -v true 后重启 iBMA。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 860,
+      "topic_title": "OS侧安装iBMA后openUBMC下不显示iBMA版本等信息",
+      "topic_url": "https://discuss.openubmc.cn/t/860",
+      "has_accepted_answer": true,
+      "answer_author": "luohao211737"
+    }
+  },
+  {
+    "input": {
+      "question": "华为版本 BMC 能正常导入 SSL 证书，但社区版本构建的 BMC 无论有无密码的证书都导入失败，为什么？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "openssl",
+        "3.x",
+        "证书",
+        "p12",
+        "unsupported"
+      ],
+      "expected_area": "security-ssl",
+      "reference_answer": "制作证书所用的 openssl 版本需是 3.x。用 openssl 1.x 生成的证书在社区版导入会报 digital envelope routines unsupported（error:0308010C）；升级到 openssl 3.x 重新生成证书后导入即成功。这与固件签名用的 CA 无关。"
+    },
+    "metadata": {
+      "category": "security",
+      "difficulty": "easy",
+      "source": "openubmc-forum",
+      "topic_id": 938,
+      "topic_title": "社区版本BMC导入SSL证书失败",
+      "topic_url": "https://discuss.openubmc.cn/t/938",
+      "has_accepted_answer": true,
+      "answer_author": "TuHuaNeng(OP)"
+    }
+  },
+  {
+    "input": {
+      "question": "openUBMC 写 FRU 时遇到两个问题：部分 FRU 报 Device not present 无法 ipmitool fru write；另一个 FRU 写入了非法数据后卡在 “Writing new FRU”。怎么恢复？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "ClearElabelData",
+        "天池头",
+        "StorageType",
+        "fru.bin",
+        "128字节"
+      ],
+      "expected_area": "fru",
+      "reference_answer": "写卡死的 FRU 可用 ClearElabelData 命令恢复。Device not present 多因 EEPROM 数据不符合 FRU 规范：当 FruData 对象 StorageType 为 TianChi 时，EEPROM 前 128 字节是天池头、从第 129 字节才是 FRU 信息，若直接用烧录器把 fru.bin 烧进 EEPROM 会缺天池头，导致读出与烧入不一致。正确做法是先用 bingo 生成带天池头的 csr bin 烧入，再从第 128 字节开始写 FRU 信息；fru.bin 可从正常机器用 ipmitool fru write 导出。"
+    },
+    "metadata": {
+      "category": "fru",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 1250,
+      "topic_title": "openubmc Fru信息修改问题",
+      "topic_url": "https://discuss.openubmc.cn/t/1250",
+      "has_accepted_answer": true,
+      "answer_author": "liujie_11(OP)"
+    }
+  },
+  {
+    "input": {
+      "question": "新引入一款网卡，热插拔光模块后，dbus 上光模块信息不消失、一直显示在位。光模块的在位逻辑是怎么判断的？怎么 debug？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "handler_optical.lua",
+        "IsSffExist",
+        "Presence",
+        "bma",
+        "network_adapter"
+      ],
+      "expected_area": "network_adapter",
+      "reference_answer": "network_adapter 没有直接的在位带外信号，是通过能否拿到光模块温度/bma 推送数据来判断在位（src/lualib/bma/handles/handler_optical.lua）。现有代码只要拿到 bma 数据就把 Presence 置 1，这是 bug；应根据 data.IsSffExist 判断（true 置 1、false 置 0）。可打开 network_adapter app 的 debug 日志、看 host_agent 资源树上 bma 原始数据是否更新。注意拔插光模块要连着光纤并保持网络连通，iBMA 才会推送信息。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 1401,
+      "topic_title": "网卡光模块的在位信息是怎么判断的",
+      "topic_url": "https://discuss.openubmc.cn/t/1401",
+      "has_accepted_answer": true,
+      "answer_author": "zybwh"
+    }
+  },
+  {
+    "input": {
+      "question": "BMC 接出的两个 USB 口插了 U 盘，host（系统侧）看不到。需要怎么配置 BMC 才能在 host 里用这两个口？要 BIOS 配合吗？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "挂耳",
+        "近端运维",
+        "CPU侧",
+        "USB",
+        "映射"
+      ],
+      "expected_area": "usb",
+      "reference_answer": "这路 USB 是接到挂耳上的、主要给 BMC 本身做近端运维用，不会映射成业务侧 USB 资源，所以 host 看不到。如果要业务侧（系统侧）使用的 USB，需要从 CPU 侧拉对应的硬件资源出来，不能靠配置 BMC 把这两个口映射给 host。"
+    },
+    "metadata": {
+      "category": "usage",
+      "difficulty": "easy",
+      "source": "openubmc-forum",
+      "topic_id": 1406,
+      "topic_title": "BMC接出的USB口无法在host中使用",
+      "topic_url": "https://discuss.openubmc.cn/t/1406",
+      "has_accepted_answer": true,
+      "answer_author": "nathanael"
+    }
+  },
+  {
+    "input": {
+      "question": "板载 M.2 接口上接了一块消费级三星 NVMe 盘，按 M.2 转接板/VPD 两种方式适配都没硬盘信息，手册里也没 VPD 描述。这种盘怎么适配、信息来源是哪？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "BDF",
+        "PcieAddrInfo",
+        "handler_nvme",
+        "SN",
+        "直通盘"
+      ],
+      "expected_area": "storage-nvme",
+      "reference_answer": "消费级 M.2 NVMe 一般不支持 nvme-mi 带外，拿不到 SN，而社区代码默认通过 SN 匹配 NVMe 对象，所以匹配不上。解决：配置 PcieAddrInfo（含 RootBDF）与 Drive 对象绑定，并在直通盘代码 handler_nvme/handler_pass_through_drive 的 find_object 匹配逻辑里新增一段通过 BDF 匹配 NVMe 对象的逻辑，让 iBMA 按 BDF 找到磁盘对象再刷新信息。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 1423,
+      "topic_title": "板载M.2 NVME 存储管理界面无硬盘信息",
+      "topic_url": "https://discuss.openubmc.cn/t/1423",
+      "has_accepted_answer": true,
+      "answer_author": "yelmh_kno07"
+    }
+  },
+  {
+    "input": {
+      "question": "非天池模式静态配 sr 文件，pcieaddrinfo 对象里 slotid/socketid 正常，但 pcie_device 对象里 slotid、socketid 都是 0，像是没同步。怎么排查？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "RefMgmtConnector",
+        "BusinessConnector",
+        "pcie_device",
+        "hwdiscovery",
+        "同步"
+      ],
+      "expected_area": "pcie_device",
+      "reference_answer": "槽位是在 pcie_device 把 PCIeAddrInfo 与 PCIeDevice 同步的函数里完成的，可在那加日志。报 “RefMgmtConnector exists but has no path” 指 IEU 上 BusinessConnector 的 RefMgmtConnector 没有引用到对应的 Connector 对象。结合 hwdiscovery 的 analyse.lua 报 “get reference object failed / ignore property RefMgmtConnector” 可知是 Connector_PCIE_x 的引用解析失败，导致槽位/CPU 归属没同步过去；需排查该 Connector 是否真正上了 hwdiscovery 资源树及引用配置。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 1429,
+      "topic_title": "系统管理-其他-PCIE卡页面槽位号和CPU归属信息不同步",
+      "topic_url": "https://discuss.openubmc.cn/t/1429",
+      "has_accepted_answer": false,
+      "answer_author": "zybwh"
+    }
+  },
+  {
+    "input": {
+      "question": "我把 16 个风扇都加进了自定义风扇策略的 FanIdxGroup，但只有前 4 个受智能调速控制，其余 12 个 cooling 日志显示 0xffff。配置哪里要改？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "CoolingConfig",
+        "FanBoardNum",
+        "FanIdxGroup",
+        "目标调速",
+        "风扇板"
+      ],
+      "expected_area": "thermal",
+      "reference_answer": "多风扇板场景需要在 CoolingConfig 对象里把 FanBoardNum 配成 2（你用了两个风扇板 sr 就属于这种）。另外新增风扇要配“目标+环温”或仅目标调速，不支持仅环温线性调速；同时确认 CSR 里风扇 id 正确、无重复、与资源树风扇对象对应。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 1446,
+      "topic_title": "添加多个风扇到风扇温度策略的风扇组，部分风扇仍不受风扇温度策略控制的问题",
+      "topic_url": "https://discuss.openubmc.cn/t/1446",
+      "has_accepted_answer": true,
+      "answer_author": "wwhh"
+    }
+  },
+  {
+    "input": {
+      "question": "适配 300I Atlas Duo 卡，插单张内存容量正常，插多张相同卡只有一张显示内存容量，BMC 重启/AC 后显示数量还会变。根因是什么？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "taskName",
+        "轮询任务",
+        "内存容量",
+        "唯一",
+        "闭源组件"
+      ],
+      "expected_area": "npu",
+      "reference_answer": "根因是多张卡查询内存容量的轮询任务用了同一个 taskName（任务名没保持每张卡唯一），导致只有一张卡的内存容量被查到。该逻辑在闭源组件里，需修改让每张卡任务名唯一；最新版本已修复，可更新组件后重新验证。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 1491,
+      "topic_title": "300I ATLAS DUO卡适配后，多张卡插入后只有一张显示内存容量",
+      "topic_url": "https://discuss.openubmc.cn/t/1491",
+      "has_accepted_answer": true,
+      "answer_author": "huangjiapei_o2800"
+    }
+  },
+  {
+    "input": {
+      "question": "BMC 有没有途径修改 smbios（Type 0/1/2 这些）信息？比如改 Manufacturer、Product Name、Serial Number。"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "decoder.lua",
+        "DecoderMap",
+        "smbios",
+        "解析",
+        "BIOS上报"
+      ],
+      "expected_area": "bios-smbios",
+      "reference_answer": "BMC 对 smbios 只做解析、不做修改（解析入口在 bios 组件 include/decoder.lua，当前支持 Type 4/6/7/16/17，可仿照在 DecoderMap 下新增 Type 0/1/2 解析器）。要手动验证可通过 telnet/一键收集把 smbios 文件导出，用 xxd/bcompare 改后 scp 到 /data/opt 再导入，但 smbios 由 BIOS 带内上报，OS 重启后字段会被刷回原值，所以这种改法不会持久生效。"
+    },
+    "metadata": {
+      "category": "usage",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 1545,
+      "topic_title": "bmc修改smbios相关信息的途径",
+      "topic_url": "https://discuss.openubmc.cn/t/1545",
+      "has_accepted_answer": true,
+      "answer_author": "yetaojie"
+    }
+  },
+  {
+    "input": {
+      "question": "某网卡只支持 MCTP over SMBus、不支持 MCTP over PCIe，openUBMC 当前支持 MCTP over SMBus 吗？怎么适配让 endpoint 上树？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "MCTP over SMBus",
+        "Endpoint",
+        "TargetEid",
+        "MctpBinding",
+        "mctpd"
+      ],
+      "expected_area": "mctp-smbus",
+      "reference_answer": "openUBMC 已支持 MCTP over SMBus。SMBus 链路是 BMC 直连对端、由 BMC 直接给对端分配 eid，eid 配在网卡 CSR 的 Endpoint 对象 TargetEid 属性里；还需新增 MctpBinding 配置(BmcSMBusEid/BmcSMBusPhyAddr)，都放在网卡 CSR 中。适配在 network_adapter 做 SMBus 报文封装解析。是否上树直接查 mctpd 的资源树；没上树用 app.log grep smbus/mctp 看报错。"
+    },
+    "metadata": {
+      "category": "mctp-smbus",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 1549,
+      "topic_title": "openubmc是否支持mctp over smbus进行带外管理？",
+      "topic_url": "https://discuss.openubmc.cn/t/1549",
+      "has_accepted_answer": true,
+      "answer_author": "changxingOpenUBMC"
+    }
+  },
+  {
+    "input": {
+      "question": "在 openUBMC 上适配 Atlas 300V Pro NPU 卡，适配后信息不全，没有内存容量和系统固件版本。怎么定位？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "NpuCard",
+        "Model",
+        "Atlas_300I_Pro",
+        "内存容量",
+        "debug"
+      ],
+      "expected_area": "npu",
+      "reference_answer": "先确认 OS 下 300V Pro 的驱动和固件已安装且配套。若走的是 Pro 卡协议，NpuCard 对象的 Model 属性需要配置成 Atlas_300I_Pro；注意 Pro 卡本身不支持获取内存容量。进一步定位需打开组件 debug 开关做一键收集看 app.log（多张卡首次加载会较慢/转圈属已知现象）。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 1550,
+      "topic_title": "Atlas 300V pro NPU卡信息显示不全",
+      "topic_url": "https://discuss.openubmc.cn/t/1550",
+      "has_accepted_answer": false,
+      "answer_author": "huangjiapei_o2800"
+    }
+  },
+  {
+    "input": {
+      "question": "tianchi 目录下有多个 sr 文件，root.sr 是怎么决定下面的 EXU 用哪个 sr 的？鲲鹏 920 模组默认烧的是哪个、怎么更新？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "天池",
+        "eeprom",
+        "内置CSR",
+        "BomId",
+        "Connector"
+      ],
+      "expected_area": "csr-tianchi",
+      "reference_answer": "天池自发现是通过读 EXU eeprom 里烧录的 csr 来识别板卡、选用对应 sr 的；BMC 内置的 CSR 只是最低版本备份。鲲鹏模组(920S)出厂烧录的 CSR openUBMC 可能不兼容，建议把 CSR 内置到 BMC 而不是烧 eeprom：新建如 14100513_EXU_01.sr，并把 root.sr 里 Connector 的 id 改为 EXU、auxid 改为 01 来关联（Connector 里 BomId 可写死）。可在一键收集 framework.log 搜 EXU、看 Connector_EXU 的 loadStatus 是否为 0 判断加载是否成功。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 1585,
+      "topic_title": "root.sr是如何选择下面的exu用哪个sr文件的？",
+      "topic_url": "https://discuss.openubmc.cn/t/1585",
+      "has_accepted_answer": true,
+      "answer_author": "hiwyh_yve6j"
+    }
+  },
+  {
+    "input": {
+      "question": "2506 加了自签名后编译、签名都成功，先刷过渡包再刷自编译的 openUBMC 包提示升级失败，app.log 报写配置文件失败。怎么回事？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "community_enable",
+        "自签名",
+        "opt/bmc/trust/partner",
+        "过渡包",
+        "验签"
+      ],
+      "expected_area": "firmware-upgrade",
+      "reference_answer": "升级失败是因为包既走了验签又没做加密：社区无签名包必须在过渡包里设 community_enable:true（社区无签名模式）；升级自制签名包则过渡包不设 community_enable，且构建时要把自签名根 CA 证书打包到 opt/bmc/trust/partner。两种过渡包对应不同场景不可混用。报 add crl file error/验签失败时，要确认自签名固件包的私钥与过渡包里验签用的公钥是成对的。"
+    },
+    "metadata": {
+      "category": "firmware-upgrade",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 1698,
+      "topic_title": "OpenUBMC2506 BMC固件升级失败",
+      "topic_url": "https://discuss.openubmc.cn/t/1698",
+      "has_accepted_answer": false,
+      "answer_author": "caiyesheng_b48v3/Larry_Li"
+    }
+  },
+  {
+    "input": {
+      "question": "更新 BMC 后网页功能不好使了，想回退到上一个版本，有什么办法？BMC 多分区能切换镜像吗？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "ipmcset -d rollback",
+        "uboot",
+        "回退",
+        "分区",
+        "管理员"
+      ],
+      "expected_area": "firmware-upgrade",
+      "reference_answer": "BMC 下用管理员权限执行 ipmcset -d rollback 回退到另一分区镜像。若该命令报错（如改了 account 组件导致权限异常），可 AC 后进 uboot 命令行做分区倒换。"
+    },
+    "metadata": {
+      "category": "firmware-upgrade",
+      "difficulty": "easy",
+      "source": "openubmc-forum",
+      "topic_id": 2059,
+      "topic_title": "如何回退bmc版本？",
+      "topic_url": "https://discuss.openubmc.cn/t/2059",
+      "has_accepted_answer": true,
+      "answer_author": "livein2ndworld"
+    }
+  },
+  {
+    "input": {
+      "question": "BMC 3.xx.xx.xx 版本怎么升级到 openUBMC？出包和升级后需要做哪些操作？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "manufacture",
+        "community_enable",
+        "ssl证书",
+        "过渡包",
+        "busybox"
+      ],
+      "expected_area": "firmware-upgrade",
+      "reference_answer": "出包时在 manifest.yml 把 account 的 option 改为 manufacture:true（默认账号 Administrator/openUBMC@2025），第一次升级建议加 busybox 便于导入 ssl 证书。升级后 telnet 到 23 端口，先 date -s 设当前时间（时间不对证书导入会失败），再 ipmcset -t certificate -d import -v /tmp/server.p12 1 <密码> 导入证书才能访问 web（26.03 起支持 ssl 内置免手动导入）。注意过渡包会导入各公司自己的根公钥，需用基于该根证书签名的包升级，证书链才校验通过；提示“无效的升级包”多为验签/解密未过。"
+    },
+    "metadata": {
+      "category": "firmware-upgrade",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 2060,
+      "topic_title": "BMC 3.xx.xx.xx版本升级openubmc指导",
+      "topic_url": "https://discuss.openubmc.cn/t/2060",
+      "has_accepted_answer": false,
+      "answer_author": "guoxin(OP)"
+    }
+  },
+  {
+    "input": {
+      "question": "背板接了两块 SATA 盘、系统侧装了 iBMA，但 BMC 获取不到硬盘信息，host_agent 上 SilkScreen 是 null。SAS/SATA 盘是怎么和 iBMA 信息匹配的？要配什么对象？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "PcieAddrInfo_SAS",
+        "SilkScreen",
+        "丝印",
+        "PortID",
+        "ControllerType"
+      ],
+      "expected_area": "storage-disk",
+      "reference_answer": "SAS/SATA 盘是通过 silktext/丝印映射到对应 Drive 对象的，host_agent 上 SilkScreen 为 null 就匹配不上。需要在硬盘背板配置 PcieAddrInfo_SAS 对象，且 Bus/Device/Function/PortID 要配置正确（SAS 控制器 ControllerType=2、SATA=3）；PortID 对应 OS 下硬盘的 physical id，SlotID 与 PortID 要一一对应。可对照开源仓里已适配的硬盘背板 sr 配置。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 2075,
+      "topic_title": "SAS/SATA盘信息无法获取",
+      "topic_url": "https://discuss.openubmc.cn/t/2075",
+      "has_accepted_answer": true,
+      "answer_author": "liujie_11(OP)"
+    }
+  },
+  {
+    "input": {
+      "question": "Ubuntu 24.04 上按文档搭好环境后构建 BMC 失败（libsoc_adapter 等构建失败），该怎么排查？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "conan user",
+        "openubmc_dev",
+        "bingo build",
+        "25.06",
+        "bmc_sdk"
+      ],
+      "expected_area": "build-env",
+      "reference_answer": "manifest 的 tags 要用 25.06（git checkout 25.06）、bmc_sdk 也用 25.06。环境搭好、构建前先执行 conan user <社区用户名> -p <密码> -r openubmc_dev 配置 conan 账号，再 LOG=DEBUG bingo build，并另开终端 tail -f temp/log/task.log 看详细错误。期间 apt 依赖装不上要手动 dpkg --configure -a 再装，pip 包与系统包冲突(如 cryptography)需先卸载；建议用清华源、离线干净环境。"
+    },
+    "metadata": {
+      "category": "build-env",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 2124,
+      "topic_title": "构建BMC失败",
+      "topic_url": "https://discuss.openubmc.cn/t/2124",
+      "has_accepted_answer": true,
+      "answer_author": "arch"
+    }
+  },
+  {
+    "input": {
+      "question": "装好 iBMA 2.16.1、服务也开了，但 openUBMC 首页不显示 CPU 和内存信息，系统下还循环报 edma no response。怎么定位？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "iBMA_support_https",
+        "SMBIOS",
+        "redfish",
+        "CPUUsagePercent",
+        "上报"
+      ],
+      "expected_area": "ibma",
+      "reference_answer": "先确保 OS 侧 iBMA 开了 https（ibmacli conf modify -n iBMA.ini -a iBMA_System.iBMA_support_https -v true 后重启），iBMA 管理页才有信息。CPU/内存占用是走 SMBIOS 上报的：检查一键收集里有没有 SMBIOS 文件、调 redfish /redfish/v1/Systems/<id> 看 Oem 下 CPUUsagePercent/MemoryUsagePercent 是否为空。若为空说明 SMBIOS 上报不正常，需结合 iBMA common.log 进一步分析上报链路。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 2203,
+      "topic_title": "安装iBMA后ubmc的首页没有上传cpu和内存信息",
+      "topic_url": "https://discuss.openubmc.cn/t/2203",
+      "has_accepted_answer": false,
+      "answer_author": "hunagjunhua/kunlun_xiongzirui"
+    }
+  },
+  {
+    "input": {
+      "question": "执行 Get auth token 时，用管理员和操作员的 role_id 拿到的 token 居然是一样的，而且操作员 token 访问 redfish 提示权限不足。为什么 token 会一致？怎么拿到管理员权限的 token？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "ChannelType",
+        "token表",
+        "role_id",
+        "SecurityService",
+        "IPMIChannelAccess"
+      ],
+      "expected_area": "ipmi-redfish",
+      "reference_answer": "内部按 ChannelType 存了一张 token 表（key=ChannelType，如 SMS/IPMB），获取时若该 ChannelType 已有 token 就直接返回、没有才按传入 role_id 新建——这就是为什么不同 role_id 拿到同一个 token。所以要一开始就用管理员权限获取 token；若已拿了操作员 token，要等其超时（默认 1 小时）失效再获取管理员 token。get auth token 只支持 CT_SMM/CT_EDMA 通道；也可带外 PATCH /redfish/v1/Managers/1/SecurityService 改 IPMIChannelAccess 最高权限，或装备阶段定制 Custom_SMSAccessRole/Custom_IPMBAccessRole=4。"
+    },
+    "metadata": {
+      "category": "security",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 2973,
+      "topic_title": "执行Get auth token命令时，使用管理员与操作员获取到的token值是一致的",
+      "topic_url": "https://discuss.openubmc.cn/t/2973",
+      "has_accepted_answer": true,
+      "answer_author": "Larry_Li"
+    }
+  },
+  {
+    "input": {
+      "question": "社区 2509 版本出包部署到开发板后能看到版本但网络一直不通，同一固件包刷整机却正常。怎么排查？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "activeport",
+        "ipmcget -d ip",
+        "link status",
+        "硬件",
+        "开发板"
+      ],
+      "expected_area": "network",
+      "reference_answer": "先 ipmcget -d ip / ipmcget -d ethport 看生效网口(active port)是哪个、是否 link up，用 ipmcset -d activeport -v 0 <portid> 把生效网口切到真正 link up 的口；再用 /sbin/ifconfig、/sbin/route、ethtool 确认。本例最终定位为开发板硬件个例问题（其他开发板正常）：拔插网线串口没有 Link up/Link down 打印、link status 不准，说明是该开发板硬件链路问题，需找硬件定位。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 3236,
+      "topic_title": "咨询社区2509版本出包部署到开发板后，网络异常问题",
+      "topic_url": "https://discuss.openubmc.cn/t/3236",
+      "has_accepted_answer": true,
+      "answer_author": "lishuol/OP"
+    }
+  },
+  {
+    "input": {
+      "question": "qemu 里 devmon 服务没自动启动，手动起来后 busctl 看 D-Bus 上没有网卡/GPU 卡对象。怎么让 devmon 加载设备、暴露这些对象？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "devmon",
+        "AddDevice",
+        "设备树",
+        "libhi182x.so",
+        "CSR"
+      ],
+      "expected_area": "qemu-devmon",
+      "reference_answer": "需参考 manifest 适配南向设备树的 MR 来拉起 devmon（加载卡是 devmon 的能力而非 qemu）。devmon 起来后查 /opt 有没有 libhi182x.so，有则多半是 CSR 没被识别，用设备树 sr 加载：busctl --user call bmc.kepler.devmon /bmc/dev bmc.dev AddDevice ... 传入 csr json 和 Position/Slot/Buses 等参数。若 devmon 报 “Unsupported chip type: Smc” 说明该芯片 qemu 未适配；可 cat /var/log/app.log | grep devmon 看具体报错。"
+    },
+    "metadata": {
+      "category": "qemu",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 3337,
+      "topic_title": "qemu中D-Bus接口显示不全",
+      "topic_url": "https://discuss.openubmc.cn/t/3337",
+      "has_accepted_answer": true,
+      "answer_author": "fxx551_l4il6"
+    }
+  },
+  {
+    "input": {
+      "question": "通过资源树 SetLLDPTxEnable 发送 set_lldp cmd 时 request 返回 false，mctpd 报 request timeout，但改 timeout 传参没用。网卡侧其实处理成功了，只有 BMC 侧报超时。可能是什么原因？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "mctpd",
+        "request timeout",
+        "tracemctp",
+        "4字节对齐",
+        "payload"
+      ],
+      "expected_area": "ncsi-mctp",
+      "reference_answer": "用 attach + tracemctp 抓 mctp 报文一边抓一边发命令对比。网卡侧能收到并成功处理、回了响应，但 BMC 侧报超时，重点怀疑 ncsi 响应报文的 payload 没有 4 字节对齐：NCSI 协议规定 payload 若不在 32-bit 边界结束，需补 1~3 个 0x00 padding 把 checksum 字段对齐到 32-bit 边界，否则 BMC 解析/校验失败表现为超时。对比 task（循环 timer）下发与手动下发时网卡返回数据是否一致。"
+    },
+    "metadata": {
+      "category": "mctp-smbus",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 3618,
+      "topic_title": "SetLLDPTxEnable接口调用时报错提示send fail",
+      "topic_url": "https://discuss.openubmc.cn/t/3618",
+      "has_accepted_answer": true,
+      "answer_author": "huangzhiyu"
+    }
+  },
+  {
+    "input": {
+      "question": "网卡 smbus 配了主从切换模式（改了 endpoint 的 mediumtype），但抓线看 BMC 发完报文后没切到 slave，行为和固定 master 一样；配成 2 时发出的报文内容还多了几个字节。怎么回事？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "MediumType",
+        "BmcSMBusPhyAddr",
+        "Endpoint",
+        "csr格式版本",
+        "主从切换"
+      ],
+      "expected_area": "mctp-smbus",
+      "reference_answer": "主从切换耗时高导致未收到响应是已知问题，已在 1 月修复、约 330 版本带上（runtime_accessor 约 1.110.6）。MediumType=128 是固定主从(BMC 做主，一写一读)，=2 是切换模式。设备树 csr2.0(格式版本 5.00)可改用 csr1.0(格式版本 3.00)规避多字节问题。BmcSMBusPhyAddr 要配 16、不能填 0（发送报文 source addr = BmcSMBusPhyAddr<<1|1，填 0 会变广播）；并让 root.sr 对应 i2c 配置的地址与 BmcSMBusPhyAddr 一致(16 则填 32)。"
+    },
+    "metadata": {
+      "category": "mctp-smbus",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 3663,
+      "topic_title": "openubmc smbus主从切换模式没有效果",
+      "topic_url": "https://discuss.openubmc.cn/t/3663",
+      "has_accepted_answer": false,
+      "answer_author": "huangzhiyu"
+    }
+  },
+  {
+    "input": {
+      "question": "适配某 NPU 卡，温度已在资源树正确显示，但用同步语法把它同步到门限传感器对象的 Reading，Reading 一直不变。怎么排查？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "emit-changed",
+        "同步语法",
+        "ReadingStatus",
+        "Entity",
+        "大驼峰"
+      ],
+      "expected_area": "framework-sync",
+      "reference_answer": "同步引用是被动触发、读一次刷一次，源属性必须配 emit-changed/emitsChangedSignal=true 才会在变化时推送。类名要大驼峰(WzAtlasModel)，CSR 里要配具体对象(WzAtlasModel_1)并用 <=/WzAtlasModel_1.CoreTemp 引用、对象需配 CSR。另外若关联的 Entity 不存在/未上电(PowerState=0)/Presence=0，传感器会被实体依赖机制自动置 Status=Disabled、ReadingStatus=1，即使表达式正确也不生效——检查 Entity 配置，并用 hwdiscovery objectgroup GetObjects 看表达式解析路径、busctl monitor 看信号是否发出。"
+    },
+    "metadata": {
+      "category": "framework",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 3781,
+      "topic_title": "属性无法自动更新",
+      "topic_url": "https://discuss.openubmc.cn/t/3781",
+      "has_accepted_answer": true,
+      "answer_author": "zybwh"
+    }
+  },
+  {
+    "input": {
+      "question": "正在配 PCIe 卡，OS 下能看到四元组、识别到 Duo 卡，但 dmidecode 从 SMBIOS 取不到 PCIe 信息，一键收集里也没有四元组。是 BIOS 没上报吗？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "dmidecode",
+        "systemcom.dat",
+        "丝印",
+        "SlotId重复",
+        "BDF"
+      ],
+      "expected_area": "pcie",
+      "reference_answer": "dmidecode 取到的信息依赖 BMC 上报丝印。解压一键收集 dump_info/OSDump/systemcom.tar 看 systemcom.dat 有没有 VID/DID/BDF 返回给 BMC；若没有就是带内没上报 bdf。根因常是丝印重复：silkconfig 里同一个 SlotId 配置了两次，导致 BIOS 不上报 bdf。排查 csr（riser/psr/基础板）的 pcie 配置是否重复，并与 BIOS 对齐丝印文件。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 4486,
+      "topic_title": "PCIE卡加载问题",
+      "topic_url": "https://discuss.openubmc.cn/t/4486",
+      "has_accepted_answer": false,
+      "answer_author": "huangjiapei_o2800"
+    }
+  },
+  {
+    "input": {
+      "question": "网卡通过 NCSI 接 BMC、同时通过 PCIe 接主 CPU。现在只有经交换芯片的专用网口 eth2 能用，NCSI 网口(eth0)用不了。这种硬件下该怎么适配 NCSI 网口让它可用？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "NCSI",
+        "DedicatedPort",
+        "ipmcget -d ipinfo",
+        "bmc_network",
+        "边带"
+      ],
+      "expected_area": "ncsi",
+      "reference_answer": "NCSI 口不需要配 DedicatedPort_Eth2 配置项。network_adapter 识别到 NCSI 口后会向 bmc_network 注册 NCSI 网口；可用 ipmcget -d ipinfo 看 NCSI 是否为工作网口、web 上能否看到并切换工作网口。若 NCSI 口起不来，先排查边带 NCSI 链路是否正常（日志里 BMC 发 ncsi 控制报文但对端无响应即链路问题）；网卡插 riser 时还需接一根 NCSI 线缆到扩展板才能边带通信。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 4611,
+      "topic_title": "NCSI网卡适配",
+      "topic_url": "https://discuss.openubmc.cn/t/4611",
+      "has_accepted_answer": false,
+      "answer_author": "grlxw"
+    }
+  },
+  {
+    "input": {
+      "question": "我新增了一个对象、声明了接口，mdbctl lsobj 能看到对象，但 lsprop 看不到属性、资源树里也没有这个对象。怎么排查为什么没上树？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "上树",
+        "MDS",
+        "getprop",
+        "unregister_mdb_object",
+        "on_add_object"
+      ],
+      "expected_area": "framework",
+      "reference_answer": "资源树对象要满足“路径 path + 接口 interface + MDS 管理”三位一体。用 getprop 看属性来源：如果只有值没有来源，说明是写死的值、同步没生效，对象其实还在内存里没上树。排查是否取消了自动上树或有下树操作(搜 unregister_mdb_object / unregister / remove)；在代码 on_add_object 回调里加打印看上树流程，并看 framework.log 该对象对应的对象组是否被下树。"
+    },
+    "metadata": {
+      "category": "framework",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 4926,
+      "topic_title": "【新增对象】对象不上树",
+      "topic_url": "https://discuss.openubmc.cn/t/4926",
+      "has_accepted_answer": true,
+      "answer_author": "chenghaoyang"
+    }
+  },
+  {
+    "input": {
+      "question": "带内执行 ipmitool mc reset warm，framework 日志显示 WarmReset get object fail、组件超时、最后热复位失败。是真失败了吗？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "WarmReset",
+        "running.log",
+        "iptables",
+        "超时",
+        "网络"
+      ],
+      "expected_area": "framework",
+      "reference_answer": "从 running.log 看（BMA is online + Warm reset successfully）热复位实际是成功的。framework 里的超时是个别组件热复位执行动作耗时较久，WarmReset get object fail 是部分微组件没获取到、不影响结果。注意 25.12 热复位期间网络不会断连，只会重建一下 iptables 规则、一直能 ping 通，所以用“网络是否断开”来判断热复位是否生效并不准确。"
+    },
+    "metadata": {
+      "category": "usage",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 5593,
+      "topic_title": "BMC热复位失败",
+      "topic_url": "https://discuss.openubmc.cn/t/5593",
+      "has_accepted_answer": true,
+      "answer_author": "huangzhiyu"
+    }
+  },
+  {
+    "input": {
+      "question": "博通 9560-8i + 12exp 背板，没有 raid 组、设成 jbod 模式，拔掉 SAS/SATA 盘后报告警 0x0200000B（The disk Disk8 RAID array is invalid）。这正常吗？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "JBOD",
+        "0x0200000B",
+        "故障灯",
+        "Presence",
+        "RAID array invalid"
+      ],
+      "expected_area": "storage-raid",
+      "reference_answer": "当前代码只判断硬盘类型和 raid 控制器 id，硬盘不在位(Presence=0)且故障灯亮(LocateLed=0)就会报该告警。故障灯是 raid 通过 cpld 码流主动拉起的。已和伙伴对齐：不在位+故障灯亮被识别为“raid 组中硬盘被拔出”的场景，需要一个告警，当前用的就是“阵列失效”告警——行为可解释，但告警文案语义有误导，属可优化点。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 5651,
+      "topic_title": "没有阵列拔盘后显示The disk Disk8 RAID array is invalid.",
+      "topic_url": "https://discuss.openubmc.cn/t/5651",
+      "has_accepted_answer": false,
+      "answer_author": "yelmh_kno07"
+    }
+  },
+  {
+    "input": {
+      "question": "2512_LTS 适配 AIC SSD 卡，PCIeCard_1 的 SerialNumber 同步语法生效了，但 FirmwareVersion 同步失败、getprop 也取不到它的同步配置。怎么定位？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "同步语法",
+        "ObjectGroup GetObjects",
+        "hwdiscovery",
+        "hw_stream.log",
+        "FirmwareVersion"
+      ],
+      "expected_area": "framework-sync",
+      "reference_answer": "排查同步问题：用 busctl --user call bmc.kepler.hwdiscovery /bmc/kepler/ObjectGroup/00 bmc.kepler.ObjectGroup GetObjects a{ss}s 0 <组件名>（替换 position 和组件名）看组件拿到的自发现对象是否带了该同步配置。有配置就查 app.log 里组件的同步解析错误日志；没配置就查 framework.log 和 /dev/shm/log/hw_stream.log 里 hwdiscovery 的解析错误。同时确认源属性配了 emit-change、两个对象层级关系正确。"
+    },
+    "metadata": {
+      "category": "framework",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 6228,
+      "topic_title": "同步属性配置未生效问题",
+      "topic_url": "https://discuss.openubmc.cn/t/6228",
+      "has_accepted_answer": false,
+      "answer_author": "chenghaoyang"
+    }
+  },
+  {
+    "input": {
+      "question": "社区 1230 版本，AC 上电后偶现盘的 ContainerPhysicalContext（Front/Rear 丝印）为空，重启 hardware 服务又能拿到。有什么排查方向？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "丝印",
+        "ContainerPhysicalContext",
+        "general_hardware",
+        "AC时序",
+        "重启hardware"
+      ],
+      "expected_area": "storage-disk",
+      "reference_answer": "这是 AC 时序问题：位置信息缺 Front/Rear 是因为 general_hardware 组件更新硬盘背板信息时出错（与框架闭源组件初始化报错相关，见 topic 6303）。临时方案是加重试/重启 hardware 服务重建资源树。可先带上 general_hardware “修复 hardware 进程无法记录内存信息”的 PR 验证框架报错是否消除。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 6250,
+      "topic_title": "AC后概率性拿不到丝印，导致盘的位置信息不详细",
+      "topic_url": "https://discuss.openubmc.cn/t/6250",
+      "has_accepted_answer": false,
+      "answer_author": "yelmh_kno07"
+    }
+  },
+  {
+    "input": {
+      "question": "OpenUBMC 251230，AC 后高概率在 check_dependencies 失败，报 attempt to call field 'prop_changed' (a nil value)，重启 bmc/hardware 进程后就正常。这是什么原因？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "prop_changed",
+        "check_dependencies",
+        "初始化竞态",
+        "libmc4lua",
+        "starter.lua"
+      ],
+      "expected_area": "framework",
+      "reference_answer": "这是典型的初始化竞态：AC 后多个组件并行启动，general_hardware 比它依赖的框架组件(libmc4lua)更快执行到调用点，此时 mem_collect/starter.lua 里的 prop_changed 还没被正确定义/注册，于是报 nil。报错在 fork 出去的函数而非 check_dependencies 本身。解决参考 general_hardware “修复 hardware 进程无法记录内存信息”的 PR；也可在依赖检查里加重试/延迟等框架就绪。"
+    },
+    "metadata": {
+      "category": "framework",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 6303,
+      "topic_title": "AC后general_hardware高概率检查依赖失败，报错来源框架组件",
+      "topic_url": "https://discuss.openubmc.cn/t/6303",
+      "has_accepted_answer": false,
+      "answer_author": "yelmh_kno07"
+    }
+  },
+  {
+    "input": {
+      "question": "风扇在位 scanner 扫描周期是 2 秒，为什么日志里风扇在位状态会在毫秒级发生跳变（Presence 1→0）？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "scanner",
+        "SmcDfxInfo",
+        "CPLD",
+        "last_present",
+        "plugout"
+      ],
+      "expected_area": "thermal",
+      "reference_answer": "该在位 scanner 没有使用 SmcDfxInfo 机制。跳变发生在 EXU CPLD 升级重载阶段（出现一次、非持续性），直接通过 smc 读在位也会跳变。这种抖动会导致 plugin 创建的 fan_start 任务流程异常：风扇从在位跳到不在位时 last_present 状态出问题，有的风扇无法触发 plugout 流程。"
+    },
+    "metadata": {
+      "category": "hardware-adaptation",
+      "difficulty": "medium",
+      "source": "openubmc-forum",
+      "topic_id": 6587,
+      "topic_title": "风扇在位状态短时间跳变",
+      "topic_url": "https://discuss.openubmc.cn/t/6587",
+      "has_accepted_answer": false,
+      "answer_author": "WH11003(OP)"
+    }
+  },
+  {
+    "input": {
+      "question": "从 2603 版本升级到 LTS SP2 版本后 BMC 网络不通，回退 2603 再不保留配置升级还是不通。app 日志和 bmc_network 组件有关，怎么解决？"
+    },
+    "expected_output": {
+      "answer_keywords": [
+        "bmc_network",
+        "GE1",
+        "自定义网口名",
+        "ethname",
+        "物理接口"
+      ],
+      "expected_area": "bmc_network",
+      "reference_answer": "根因是 2603(03 版本)启用了自定义网口名(GE1)，而 LTS SP2/老版本里这个逻辑接口名 GE1 没有被正确映射/创建到系统网络设备树，bmc_network 初始化、设路由、发报文都因“找不到设备”失败导致网络不通。解决：升级老版本前先在新版本把网口名改回正常的物理口名(GE→eth)再升级；根本上 bmc_network 应通过物理接口名(ethname，如 eth2)匹配 MAC，而不是通过逻辑网口资源树对象匹配。"
+    },
+    "metadata": {
+      "category": "firmware-upgrade",
+      "difficulty": "hard",
+      "source": "openubmc-forum",
+      "topic_id": 6733,
+      "topic_title": "从2603版本升级到LTS SP2版本后，BMC网络不通",
+      "topic_url": "https://discuss.openubmc.cn/t/6733",
+      "has_accepted_answer": false,
+      "answer_author": "grlxw"
+    }
+  }
+]

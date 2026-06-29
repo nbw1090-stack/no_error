@@ -108,6 +108,17 @@ class ConversationContext:
                 self.max_history,
             )
             trimmed = history[-self.max_history :]
+            # 条数裁剪可能从一组 assistant(tool_calls) → tool 结果 中间切开，使
+            # 裁剪后历史以「孤儿 tool 消息」开头（其对应的 tool_calls 已被切掉）。
+            # OpenAI/DeepSeek 要求 tool 消息必须紧跟带 tool_calls 的 assistant，
+            # 否则报 400（"Messages with role 'tool' must be a response to a
+            # preceding message with 'tool_calls'"）。丢弃开头的孤儿 tool 消息。
+            drop = 0
+            while drop < len(trimmed) and trimmed[drop].get("role") == "tool":
+                drop += 1
+            if drop:
+                logger.debug("Dropping %d leading orphan tool message(s)", drop)
+                trimmed = trimmed[drop:]
         else:
             trimmed = history
 

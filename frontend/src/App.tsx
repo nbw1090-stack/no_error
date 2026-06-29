@@ -42,6 +42,7 @@ import StatsPanel from './components/StatsPanel';
 import ChatPanel from './components/ChatPanel';
 import SessionSidebar from './components/SessionSidebar';
 import ComponentsPanel from './components/ComponentsPanel';
+import WikiPanel from './components/WikiPanel';
 import LoginScreen from './components/LoginScreen';
 
 const SESSION_STORAGE_KEY = 'bmc_session_id';
@@ -59,7 +60,7 @@ export default function App() {
   });
 
   // ---- 视图切换：日志分析（仪表盘）/ 组件管理 ----
-  const [view, setView] = useState<'dashboard' | 'components'>('dashboard');
+  const [view, setView] = useState<'dashboard' | 'components' | 'wiki'>('dashboard');
 
   // ---- 认证状态 ----
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
@@ -537,11 +538,19 @@ export default function App() {
         >
           组件管理
         </button>
+        <button
+          className={`app-nav-tab ${view === 'wiki' ? 'active' : ''}`}
+          onClick={() => setView('wiki')}
+        >
+          Wiki 知识库
+        </button>
       </nav>
 
-      {/* 组件管理视图：全宽渲染，隐藏侧边栏与仪表盘 */}
+      {/* 组件管理 / Wiki 视图：全宽渲染，隐藏侧边栏与仪表盘 */}
       {view === 'components' ? (
         <ComponentsPanel authed={!!currentUser} />
+      ) : view === 'wiki' ? (
+        <WikiPanel authed={!!currentUser} />
       ) : (
         /* 主体布局：侧边栏 + 主内容区 */
         <div className="app-layout">
