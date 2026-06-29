@@ -106,6 +106,36 @@ class _Item:
         self.metadata = case.get("metadata") or {}
 
 
+def _expand_questions(cases: list) -> list:
+    """一例多问法展开：input.questions（列表）→ 多条独立 case，共享同一 expected_output。
+
+    用途：同一标准答案下，长句/短句/模糊等多种问法都应收敛到同一诊断——既测诊断
+    质量，也测意图识别的鲁棒性。向后兼容旧用例的单 input.question。展开后给每条
+    打 case_id/variant_index/variant_total 标签，便于按原始用例归组、看同例不同问法
+    的得分离散度。
+    """
+    expanded = []
+    for ci, case in enumerate(cases, 1):
+        inp = dict(case.get("input") or {})
+        questions = inp.get("questions")
+        if not questions:
+            single = inp.get("question")
+            questions = [single] if single else []
+        case_id = (case.get("metadata") or {}).get("case_id") or f"case-{ci}"
+        for vi, q in enumerate(questions):
+            new_inp = dict(inp)
+            new_inp.pop("questions", None)
+            new_inp["question"] = q
+            new_meta = dict(case.get("metadata") or {})
+            new_meta.update(case_id=case_id, variant_index=vi, variant_total=len(questions))
+            expanded.append({
+                "input": new_inp,
+                "expected_output": case.get("expected_output"),
+                "metadata": new_meta,
+            })
+    return expanded
+
+
 def _run_offline(task, evaluators, cases_path: str, run_name: str, data_dir: str) -> None:
     """
     离线：读本地用例，逐条跑 task + 全套 evaluator，出本地记分卡；并回灌 Langfuse。
@@ -117,7 +147,7 @@ def _run_offline(task, evaluators, cases_path: str, run_name: str, data_dir: str
     client 未启用时 observation/score 均 no-op，纯本地出分不受影响。
     """
     with open(cases_path, "r", encoding="utf-8") as f:
-        cases = json.load(f)
+        cases = _expand_questions(json.load(f))
 
     tracer = get_client()
     results = []
