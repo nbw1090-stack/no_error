@@ -65,10 +65,29 @@ def coerce_expected(expected_output) -> dict:
         exp = {}
     exp.setdefault("root_cause_keywords", [])
     exp.setdefault("expected_component", "")
+    exp.setdefault("expected_components", [])
     exp.setdefault("expected_citations", [])
     exp.setdefault("expected_tools", [])
     exp.setdefault("must_use_source", False)
     exp.setdefault("reference_answer", "")
+    # 组件归一：单值 expected_component 与列表 expected_components 合并成一个去重保序列表。
+    # 跨组件流程用例可直接给 expected_components=[消费方, 依赖方, ...]；旧用例的单值照常生效。
+    raw = []
+    if isinstance(exp["expected_component"], str):
+        raw.append(exp["expected_component"])
+    elif isinstance(exp["expected_component"], list):
+        raw.extend(exp["expected_component"])
+    if isinstance(exp["expected_components"], list):
+        raw.extend(exp["expected_components"])
+    elif isinstance(exp["expected_components"], str):
+        raw.append(exp["expected_components"])
+    merged, seen = [], set()
+    for c in raw:
+        c = (c or "").strip()
+        if c and c.lower() not in seen:
+            seen.add(c.lower())
+            merged.append(c)
+    exp["expected_components"] = merged
     return exp
 
 
@@ -144,16 +163,21 @@ def citation_match(*, input, output, expected_output, metadata=None, **kwargs):
 
 
 def component_named(*, input, output, expected_output, metadata=None, **kwargs):
-    """是否点名期望组件（如 pcie_device）。"""
+    """是否点名期望组件，支持多组件（跨组件流程）：按命中比例给分。
+
+    单组件用例退化为 1.0/0.0，与旧行为一致；跨组件用例要求把依赖链上的各组件
+    （如 pcie_device + bios）都点出来，少点一个就扣相应比例。
+    """
     exp = coerce_expected(expected_output)
-    comp = (exp["expected_component"] or "").lower()
-    if not comp:
+    comps = exp["expected_components"]
+    if not comps:
         return Evaluation(name="component_named", value=None, comment="无期望组件")
-    hit = comp in _reply(output).lower()
+    reply = _reply(output).lower()
+    hits = [c for c in comps if c.lower() in reply]
     return Evaluation(
         name="component_named",
-        value=1.0 if hit else 0.0,
-        comment=f"{'点名' if hit else '未点名'}组件 {comp}",
+        value=len(hits) / len(comps),
+        comment=f"点名组件 {len(hits)}/{len(comps)}：{('、'.join(hits)) or '无'}",
     )
 
 

@@ -1,0 +1,563 @@
+[
+  {
+    "input": {
+      "questions": [
+        "PCIe 如何加载？",
+        "BMC 上的 PCIe 设备是怎么被加载出来的？整个流程依赖哪个组件、靠什么机制联动？",
+        "插了 PCIe 卡但 BMC 上看不到设备，是不是别的组件没把数据给过来？",
+        "pcie_device 的设备列表到底是谁喂给它的？",
+        "日志里反复出现 `[BizTopoLoader] Bios BDF changed. sys_id=0` 和 `[BizTopoLoader] Parse Card BDF`，这是在走什么流程？这些 BDF 数据是哪个组件上报上来的？"
+      ],
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 1
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "bios",
+        "BDF",
+        "PcieCardBDF",
+        "bmc.kepler.Systems.Bios",
+        "OnBiosPropertiesChanged",
+        "on_pcie_card_bdf_changed",
+        "device_loader",
+        "属性变更"
+      ],
+      "expected_components": ["pcie_device", "bios"],
+      "expected_citations": [
+        "biz_topo_service.lua:597",
+        "device_loader.lua:730",
+        "device_loader.lua:590",
+        "bios_app.lua:670",
+        "bdf_service.lua:242",
+        "bdf_service.lua:66"
+      ],
+      "expected_tools": ["gather_code_context", "resolve_interface"],
+      "must_use_source": true,
+      "reference_answer": "PCIe 设备的加载由 pcie_device 完成，但依赖 bios 先上报 PCIe 地址(BDF)，二者经 mdb 总线接口 bmc.kepler.Systems.Bios 解耦联动。①生产侧：BIOS 固件经 IPMI 命令(WritePcieCardBdfToBmc / WriteOcpCardBdfToBmc / WritePcieDiskBdfToBmc)把扫描到的 BDF 推给 bios 组件(bios_app.lua:670)，bios 的 bdf_service 拼帧校验后用 obj:set_prop 写入总线对象 /bmc/kepler/Systems/<id>/Bios 的 PcieCardBDF/OCPCardBDF/PcieDiskBDF 属性(bdf_service.lua:242 入口、bdf_service.lua:66 落属性)；②总线侧：set_prop 自动广播 PropertiesChanged 信号；③消费侧：pcie_device 启动时通过 client:OnBiosPropertiesChanged 订阅这三个属性(biz_topo_service.lua:597 listen_bios_path)，回调 device_loader:on_pcie_card_bdf_changed(device_loader.lua:730) 从对象路径解析出 sys_id、解析 BDF 字节流(device_loader.lua:590)，再 load_device 生成 PCIe 设备并挂入业务拓扑、持久化。关键依赖：没有 bios 上报 BDF，pcie_device 加载不出任何 PCIe 设备。",
+      "dependency_edge": "pcie_device --订阅 bmc.kepler.Systems.Bios.{PcieCardBDF,OCPCardBDF,PcieDiskBDF}--> bios"
+    },
+    "metadata": {
+      "category": "cross-component-flow",
+      "difficulty": "hard",
+      "expected_max_iterations": 6,
+      "case_id": "xc-pcie-bios-bdf",
+      "flow_chain": ["bios", "mdb:bmc.kepler.Systems.Bios", "pcie_device"],
+      "interface": "bmc.kepler.Systems.Bios",
+      "properties": ["PcieCardBDF", "OCPCardBDF", "PcieDiskBDF"],
+      "log_evidence": [
+        {"log": "[BizTopoLoader] Bios BDF changed. sys_id=%s", "at": "device_loader.lua:736"},
+        {"log": "[BizTopoLoader] Bios %s BDF start. sys_id=%s", "at": "device_loader.lua:681"},
+        {"log": "[BizTopoLoader] Parse Card BDF", "at": "device_loader.lua:593"}
+      ]
+    }
+  },
+  {
+    "input": {
+      "questions": [
+        "network_adapter 的 SmBios 状态是从哪来的？",
+        "网卡组件初始化时为什么要监听 SmBios，它依赖哪个组件、走的是属性订阅还是主动读对象？",
+        "现场网卡 PowerStatus 一直是 255、smbios 状态收不到变化，可能是哪条跨组件链路断了？",
+        "日志里看到 bios 打 'Update SMBios Finished'，紧接着网卡侧打 'xxx smbios status changed to 3'，这是个什么流程？这个 3 的数据是哪个组件产生又是怎么传过来的？"
+      ],
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 1
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "bmc.kepler.Systems.SmBios",
+        "SmBiosStatus",
+        "OnSmBiosPropertiesChanged",
+        "update_smbios_status",
+        "network_adapter",
+        "bios",
+        "init_smbios_status",
+        "PowerStatus"
+      ],
+      "expected_components": ["network_adapter", "bios"],
+      "expected_citations": [
+        "model.json:265",
+        "smbios_object.lua:119",
+        "smbios_service.lua:449",
+        "card_mgmt.lua:497",
+        "network_adapter.lua:2473",
+        "client.lua:581"
+      ],
+      "expected_tools": ["gather_code_context", "resolve_interface"],
+      "must_use_source": true,
+      "reference_answer": "SmBios 对象的生产方是 bios 组件：它在自己的 mds/model.json 中定义并拥有接口 bmc.kepler.Systems.SmBios（对象路径 /bmc/kepler/Systems/:SystemId/SmBios）。当 BIOS 通过 IPMI 把 SMBIOS 数据写入 BMC 时，bios 的 smbios_service 走 PREPARE→DATA→FINISH 写入状态机，依次调用 update_smbios_status，最终在 smbios_object:update_smbios_status 里把 SmBiosStatus（FINISH=3）写进 smbios_info 并落到 db_obj 后 save()，从而把属性变更发布到 mdb 消息总线上的 bmc.kepler.Systems.SmBios 接口。network_adapter 作为消费方并不直接调用 bios，而是通过属性订阅解耦：gen 出的 client 把 OnSmBiosPropertiesChanged/OnSmBiosInterfacesAdded 映射到该接口并只监听 SmBiosStatus 属性，src 里在 card_mgmt.lua 的 init_smbios_status、network_adapter.lua 的 register_listen_callback、log_collector 三处注册回调。收到 SmBiosStatus 变更后，网卡把状态同步到资源树对象，并据此判定上下电（smbios_status==3 时才允许真实 PowerStatus），同时在状态变为 3 时触发网卡日志收集。所以这条链路是 bios（写 SmBiosStatus）→ mdb 总线 bmc.kepler.Systems.SmBios → network_adapter（订阅并据 SmBiosStatus 完成网卡 SmBios/上下电/日志初始化）。",
+      "dependency_edge": "network_adapter --订阅 bmc.kepler.Systems.SmBios.{SmBiosStatus}--> bios"
+    },
+    "metadata": {
+      "category": "cross-component-flow",
+      "difficulty": "hard",
+      "expected_max_iterations": 6,
+      "case_id": "xc-netadapter-bios-smbios",
+      "flow_chain": ["bios", "mdb:bmc.kepler.Systems.SmBios", "network_adapter"],
+      "interface": "bmc.kepler.Systems.SmBios",
+      "properties": ["SmBiosStatus"],
+      "log_evidence": [
+        {"log": "Update SMBios Finished", "at": "smbios_service.lua:135"},
+        {"log": "%s smbios status changed to %s", "at": "card_mgmt.lua:502"}
+      ]
+    }
+  },
+  {
+    "input": {
+      "questions": [
+        "network_adapter 怎么知道 PCIe 槽位上下电了？",
+        "我想搞清楚网卡组件是怎么跟踪它所在 PCIe 插槽的电源状态的，是谁通知它的、收到通知后又把状态存到哪、做了什么动作？",
+        "网卡插上去之后链路状态一直不对，怀疑是没感知到槽位下电，能不能帮我顺一下 PCIeSlot 电源态从哪来、network_adapter 这边订阅没订阅上？",
+        "日志里看到 '[network_adapter] PCIeSlot power state changed to Off'，这条是谁打的、它的上游是哪个组件把 PowerState 改成 Off 的？"
+      ],
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 1
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "bmc.kepler.Systems.PCIeSlot",
+        "PowerState",
+        "OnPCIeSlotPropertiesChanged",
+        "set_power_state",
+        "set_pcie_slot_power_state",
+        "network_adapter",
+        "pcie_device",
+        "SlotPowerState"
+      ],
+      "expected_components": ["network_adapter", "pcie_device"],
+      "expected_citations": [
+        "network_adapter.lua:529",
+        "network_adapter.lua:537",
+        "client.lua:611",
+        "service.lua:97",
+        "model.json:654",
+        "pcie_slot.lua:24"
+      ],
+      "expected_tools": ["gather_code_context", "resolve_interface"],
+      "must_use_source": true,
+      "reference_answer": "network_adapter 作为消费方，在 network_adapter.lua:529 通过 client:OnPCIeSlotPropertiesChanged 注册属性订阅回调，gen/network_adapter/client.lua:611 将其映射为订阅 bmc.kepler.Systems.PCIeSlot 接口的 PowerState 属性变更信号。收到变更后，它按 path 过滤匹配到本卡所在的 matched_pcie_slot，再在 network_adapter.lua:536 把新值写入 self.SlotPowerState 并打日志，作为本地缓存的槽位电源态供后续逻辑（如链路状态判断）使用。生产方 pcie_device 在 mds/model.json:638 与 gen/pcie_device/service.lua:96-97 定义并注册了 /bmc/kepler/Systems/:SystemId/PCIeSlots/:ID 对象及 bmc.kepler.Systems.PCIeSlot 接口，PowerState（enum Off/On、emitsChangedSignal:true）即由它持有。实际写电源态在 device_service.lua:1142 的 set_pcie_slot_power_state 收到 PowerControl 方法调用后，转交 pcie_slot.lua:24 set_power_state 落到 mds_obj.PowerOnSwitch/ReadyToRemove，从而触发 PCIeSlot.PowerState 变更信号广播给订阅方。因此完整链路为 pcie_device 写槽位电源 → mdb 广播 PCIeSlot.PowerState 变更 → network_adapter 订阅回调更新 SlotPowerState。",
+      "dependency_edge": "network_adapter --订阅 bmc.kepler.Systems.PCIeSlot.{PowerState}--> pcie_device"
+    },
+    "metadata": {
+      "category": "cross-component-flow",
+      "difficulty": "hard",
+      "expected_max_iterations": 6,
+      "case_id": "xc-netadapter-pcie-slot",
+      "flow_chain": ["pcie_device", "mdb:bmc.kepler.Systems.PCIeSlot", "network_adapter"],
+      "interface": "bmc.kepler.Systems.PCIeSlot",
+      "properties": ["PowerState"],
+      "log_evidence": [
+        {"log": "[network_adapter] PCIeSlot power state changed to %s", "at": "network_adapter.lua:537"},
+        {"log": "[PCIeSlot] set power to %s failed: %s", "at": "pcie_slot.lua:48"}
+      ]
+    }
+  },
+  {
+    "input": {
+      "questions": [
+        "风扇转速到底是按什么温度调的？谁把温度给到调速的？",
+        "我想搞清楚 thermal_mgmt 风扇热管理是怎么拿到传感器温度的——是订阅 sensor 的属性变化，还是自己周期性去读 ThresholdSensor 对象的 Reading，然后喂给 PID 调速的？请把从 sensor 产生温度到 thermal 下发给 PID 的完整链路讲清楚。",
+        "机器风扇突然狂转停不下来，是不是某个温度传感器读数飙高把 PID 拉满了？这条温度是从哪个组件来的？",
+        "日志里看到 'SensorName[xxx] Health change to ..., value:.., Inlet Temp:.., Output Temp:..' 后面跟着一堆 fanId/PWM/Speed，这条是谁打的、温度是怎么读来的、跟风扇调速什么关系？"
+      ],
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 1
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "ThresholdSensor",
+        "ForeachThresholdSensorObjects",
+        "ReadingDisplay",
+        "cooling_send_temp_to_pid",
+        "PID",
+        "thermal_mgmt",
+        "sensor",
+        "主动读取"
+      ],
+      "expected_components": ["thermal_mgmt", "sensor"],
+      "expected_citations": [
+        "threshold_sensor_data_keeping.lua:40",
+        "client.lua:214",
+        "base.lua:121",
+        "cooling_pid_intf.lua:318",
+        "model.json:6",
+        "sensor_instance.lua:971"
+      ],
+      "expected_tools": ["gather_code_context", "resolve_interface"],
+      "must_use_source": true,
+      "reference_answer": "风扇热管理 thermal_mgmt 是消费方，温度生产方是 sensor，数据是温度传感器读数（ThresholdSensor.Reading / ThresholdSensorDisplay.ReadingDisplay）。关键机制不是属性订阅，而是 thermal_mgmt 在 basic_cooling/data_keeping/threshold_sensor_data_keeping.lua 里把 ForeachThresholdSensorObjects / ForeachThresholdSensorDisplayObjects 绑成 FOREACH_FUNC（threshold_sensor_data_keeping.lua:34,40），经 gen/thermal_mgmt/client.lua:206-216 沿 mdb 总线主动枚举 bmc.kepler.Systems.ThresholdSensor(Display) 对象，base.lua:114-141 的 refresh_objs_info 周期性重读刷新内存温度缓存。读到的进/出风口温度最终由 cooling_pid_intf.lua:311-331 的 cooling_send_temp_to_pid 通过 CustomSetRealTimeTemp 下发实时温度给 PID 模块驱动风扇调速。生产端 sensor 是该接口真实 owner：在 sensor/mds/model.json:2-71 定义 ThresholdSensor 对象（含 Reading、ReadingDisplay），并在 sensor_instance.lua:967-972 的 update_sensor_reading 中写入 mdb_obj.Reading 并计算 ReadingDisplay 产生温度值。因此该链路成立，且本质是 thermal_mgmt 靠『主动读取』而非属性订阅获取 sensor 的温度来做温控调速。",
+      "dependency_edge": "thermal_mgmt --读取 bmc.kepler.Systems.ThresholdSensor 温度--> sensor"
+    },
+    "metadata": {
+      "category": "cross-component-flow",
+      "difficulty": "hard",
+      "expected_max_iterations": 6,
+      "case_id": "xc-thermal-sensor-temp",
+      "flow_chain": ["sensor", "mdb:bmc.kepler.Systems.ThresholdSensor", "thermal_mgmt"],
+      "interface": "bmc.kepler.Systems.ThresholdSensor",
+      "properties": ["Reading", "ReadingDisplay"],
+      "mechanism": "active-read",
+      "log_evidence": [
+        {"log": "sensor [%s] orignal reading is changed to [%s].", "at": "sensor_instance.lua:961"},
+        {"log": "SensorName[%s] Health change to %s, value:%s, Inlet Temp:%s, Output Temp:%s, ", "at": "threshold_sensor_data_keeping.lua:104"}
+      ]
+    }
+  },
+  {
+    "input": {
+      "questions": [
+        "chassis 的健康 LED 是怎么跟着传感器走的？",
+        "我想搞清楚 chassis 这边订阅了 sensor 哪个接口、收到传感器整体健康(Health)变化之后到底做了什么动作，麻烦顺着源码把订阅点和回调里的处理逻辑讲清楚。",
+        "现在机框面板那个健康指示灯不对，传感器明明告警了灯却没变色，是不是 chassis 没收到 sensor 的健康变更通知？这条链路从哪到哪？",
+        "日志里看到 sensor 打了 'Global health has been changed from Normal to Critical'，但 chassis 侧没看到 'get_event_health change to' 的 notice，是订阅断了吗？这两端怎么对应的？"
+      ],
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 1
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "OnSensorsPropertiesChanged",
+        "bmc.kepler.Chassis.Sensors",
+        "Health",
+        "on_properties_changed",
+        "led_policy_service",
+        "global_management",
+        "execute_once_strategy",
+        "set_sensors_obj"
+      ],
+      "expected_components": ["chassis", "sensor"],
+      "expected_citations": [
+        "model.json:259",
+        "client.lua:363",
+        "led_policy_service.lua:109",
+        "service.json:150",
+        "global_management.lua:118",
+        "service.lua:46"
+      ],
+      "expected_tools": ["gather_code_context", "resolve_interface"],
+      "must_use_source": true,
+      "reference_answer": "接口 bmc.kepler.Chassis.Sensors 的属主是 sensor：它在 sensor/mds/model.json:259 把该接口定义并实现在 /bmc/kepler/Chassis/:ChassisId/Sensors 对象上（含聚合属性 Health），由 sensor/gen/sensor/service.lua:46 注册该对象。sensor 运行时通过 global_management:update_global 在 global_management.lua:118 写入 self.mdb_obj['Health']，触发 mdb 的 PropertiesChanged 信号广播。消费方 chassis 在 gen/chassis/client.lua:363 把 OnSensorsPropertiesChanged 封装为对 'bmc.kepler.Chassis.Sensors' 的属性订阅，并在 src/lualib/led_policy_service.lua:109 真正注册回调。chassis 收到 Health 变更后调用 execute_with_prop_change/execute_once_strategy，按系统健康状态刷新前面板健康/UID LED 的状态与颜色。chassis/mds/service.json:150 显式声明对该接口 Health 的 subscribe 依赖，且 chassis 自身 model.json 并不定义此接口，因此这是一条 chassis 订阅、sensor 生产的单向属性订阅链路。",
+      "dependency_edge": "chassis --订阅 bmc.kepler.Chassis.Sensors.{Health}--> sensor"
+    },
+    "metadata": {
+      "category": "cross-component-flow",
+      "difficulty": "medium",
+      "expected_max_iterations": 6,
+      "case_id": "xc-chassis-sensor",
+      "flow_chain": ["sensor", "mdb:bmc.kepler.Chassis.Sensors", "chassis"],
+      "interface": "bmc.kepler.Chassis.Sensors",
+      "properties": ["Health"],
+      "log_evidence": [
+        {"log": "Global health has been changed from %s to %s", "at": "global_management.lua:117"},
+        {"log": "get_event_health change to: %s", "at": "led_policy_service.lua:95"}
+      ]
+    }
+  },
+  {
+    "input": {
+      "questions": [
+        "BMC 里那么多组件，sensor、风扇控制这些，它们到底是怎么知道主机已经上电或者下电了？",
+        "我看 PowerState 这个属性挺多地方都在用，到底是谁产生的、谁在消费它？是 fructrl 自己改完别人订阅，还是各组件各自去读硬件信号？想理清这条主机上下电的广播链路。",
+        "主机已经下电了，可是风扇还在按上电时的转速狂转、传感器也还在采集，是不是哪个组件没收到下电通知？这个上下电状态是谁广播给它们的？",
+        "日志里看到 '==== [System:1]PowerGDStatus changed to power off ====' 和 'Boot Error data is changed by fructrl[poweroff]'，这两条是同一次下电吗？fructrl 改了什么属性导致 sensor 也跟着动？"
+      ],
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 1
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "FruCtrl",
+        "PowerState",
+        "SysResetDetected",
+        "上下电",
+        "set_PowerState",
+        "OnFruCtrlPropertiesChanged",
+        "fructrl",
+        "sensor"
+      ],
+      "expected_components": ["fructrl", "sensor", "power_mgmt", "thermal_mgmt"],
+      "expected_citations": [
+        "model.json:154",
+        "pg_signal.lua:83",
+        "client.lua:91",
+        "sel_management.lua:1416",
+        "signal.lua:87",
+        "fan_object.lua:828"
+      ],
+      "expected_tools": ["gather_code_context", "resolve_interface"],
+      "must_use_source": true,
+      "reference_answer": "PowerState（主机上下电状态）和 SysResetDetected 由 fructrl 唯一产生：它在 fructrl/mds/model.json 中定义并拥有 bmc.kepler.Systems.FruCtrl 接口（第154行），是该接口的 owner。fructrl 在 pg_signal.lua 的 dealwith_power_gd_status 里根据硬件 PowerGD 信号 set_PowerState——下电翻为 OFF、上电翻为 ON，这是全系统该属性唯一的写入点。其他组件不直接读硬件，而是通过 client:OnFruCtrlPropertiesChanged 订阅 'bmc.kepler.Systems.FruCtrl' 的 PowerState/SysResetDetected 形成一对多广播。收到变更后各消费方做不同联动：sensor 在下电或复位时把 BootError 传感器 EventData 置全 F，power_mgmt 缓存 PowerState 并把变更分发给电源升级等内部子模块，thermal_mgmt 在下电且风扇正在识别时把识别状态判为失败。因此一旦某功能（如风扇调速、采集）下电后没停，根因通常是该组件的 OnFruCtrlPropertiesChanged 订阅未生效或回调处理缺失，而非 fructrl 没翻转属性。",
+      "dependency_edge": "{sensor,power_mgmt,thermal_mgmt,pcie_device,network_adapter} --订阅 bmc.kepler.Systems.FruCtrl.{PowerState,SysResetDetected}--> fructrl"
+    },
+    "metadata": {
+      "category": "cross-component-flow",
+      "difficulty": "hard",
+      "expected_max_iterations": 6,
+      "case_id": "xc-fructrl-powerstate-broadcast",
+      "flow_chain": ["fructrl", "mdb:bmc.kepler.Systems.FruCtrl", "{sensor,power_mgmt,thermal_mgmt,pcie_device,network_adapter}"],
+      "interface": "bmc.kepler.Systems.FruCtrl",
+      "properties": ["PowerState", "SysResetDetected"],
+      "consumers_verified": ["sensor", "power_mgmt", "thermal_mgmt"],
+      "log_evidence": [
+        {"log": "==== [System:%s]PowerGDStatus changed to power off ====", "at": "pg_signal.lua:69"},
+        {"log": "Boot Error data is changed by fructrl[%s] to 0x%08X", "at": "sel_management.lua:1428"},
+        {"log": "detect power off when fan identifing", "at": "fan_object.lua:830"}
+      ]
+    }
+  },
+  {
+    "input": {
+      "questions": [
+        "observability 的 ServerIdentity 是从哪来的？",
+        "我看 observability 上报的 trace 和 log 里带了个 ServerIdentity 标签，这个值是怎么拿到主板序列号和资产标签的，跟 frudata 是什么关系？",
+        "改了机箱资产标签 AssetTag 之后，observability 上报数据里的标识没跟着变，是不是 observability 没订阅 frudata 的属性变更？",
+        "日志里看到 'Get frudata objects failed'，是不是 observability 拿不到 FruData 对象导致 ServerIdentity 配置不出来？"
+      ],
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 1
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "bmc.kepler.Systems.FruData.Board",
+        "bmc.kepler.Systems.FruData.Product",
+        "BoardSerialNumber",
+        "AssetTag",
+        "ServerIdentity",
+        "OnBoardPropertiesChanged",
+        "get_asset_tag",
+        "observability",
+        "frudata"
+      ],
+      "expected_components": ["observability", "frudata"],
+      "expected_citations": [
+        "client.lua:173",
+        "client.lua:188",
+        "observability_app.lua:136",
+        "config.lua:356",
+        "model.json:41",
+        "manage.lua:343"
+      ],
+      "expected_tools": ["gather_code_context", "resolve_interface"],
+      "must_use_source": true,
+      "reference_answer": "observability 的 ServerIdentity 标签直接来源于 frudata 拥有的 bmc.kepler.Systems.FruData.Board / Product 接口资产信息。frudata 在 mds/model.json 中定义并实现这两个接口，由 manage.lua 写入 BoardSerialNumber、AssetTag 等字段，再经 frudata_service 通过 mdb 总线发布。observability 一方面用 client.lua 的 GetBoardObjects/GetProductObjects 主动读取（config.lua 的 get_board_sn/get_asset_tag 按 FruId 匹配取值），另一方面用 OnBoardPropertiesChanged('BoardSerialNumber')、OnProductPropertiesChanged('AssetTag') 订阅属性变更。取到的资产值在 add_identity_config 里被写成 OpenTelemetry 的 ServerIdentity 标签，注入 traces 的 span_attributes 和 logs 的 otel_resource_attributes，作为遥测数据的服务器身份标识上报。当 frudata 侧资产信息变化时，订阅回调触发 set_state_flag，进而 update_fluent_bit_state 重新生成配置并重启 fluent-bit 管道，因此该跨组件链路是订阅+主动读取并存的闭环。",
+      "dependency_edge": "observability --订阅+读取 bmc.kepler.Systems.FruData.{Board,Product}--> frudata"
+    },
+    "metadata": {
+      "category": "cross-component-flow",
+      "difficulty": "medium",
+      "expected_max_iterations": 6,
+      "case_id": "xc-observability-frudata-asset",
+      "flow_chain": ["frudata", "mdb:bmc.kepler.Systems.FruData.Board", "observability"],
+      "interface": "bmc.kepler.Systems.FruData.Board",
+      "properties": ["BoardSerialNumber", "AssetTag"],
+      "log_evidence": [
+        {"log": "Get frudata objects failed", "at": "observability_app.lua:131"},
+        {"log": "BoardSerialNumber changed from %s to %s", "at": "sn_replace.lua:62"}
+      ]
+    }
+  },
+  {
+    "input": {
+      "questions": [
+        "storage 监听 ReplaceFlag 后干嘛？",
+        "我换了一块硬盘，storage 是怎么通过 ReplaceFlag 知道这块盘被换过、然后做了哪些处理的？这个标志又是谁写进去的？",
+        "服务器上换了块新硬盘但好像没被正确识别，盘的状态还是旧的报错，是不是哪个换件标记没刷新？该查哪个组件？",
+        "日志里看到 frudata 打了 'BoardSerialNumber changed from ... to ...'，但 storage 那边又报 'not found component object, drive name:... signal path:...'，这两条是一条链路吗？换件流程是不是断在 storage 这边？"
+      ],
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 1
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "bmc.kepler.Systems.Component",
+        "ReplaceFlag",
+        "OnComponentPropertiesChanged",
+        "check_replace_event",
+        "PreviousSN",
+        "CommandTimeoutTimes",
+        "storage",
+        "frudata"
+      ],
+      "expected_components": ["storage", "frudata"],
+      "expected_citations": [
+        "client.lua:299",
+        "drive_collection.lua:154",
+        "drive_collection.lua:173",
+        "model.json:203",
+        "sn_replace.lua:61",
+        "sn_replace.lua:62"
+      ],
+      "expected_tools": ["gather_code_context", "resolve_interface"],
+      "must_use_source": true,
+      "reference_answer": "frudata 是 bmc.kepler.Systems.Component 接口的唯一 owner：它在 mds/model.json 把该接口（含 ReplaceFlag 属性）定义在 /bmc/kepler/Systems/:SystemId/Components/:Id 对象上，并在 src/lualib/sn_replace.lua 的 check_replace_event 里监控 SerialNumber 变化——当新读到的 SN 与数据库持久化的 PreviousSN 不一致（判定为发生换件）时，先把 ReplaceFlag 置 0 再置 1 触发属性变更上报。storage 通过 mds/service.json 订阅该接口的 ReplaceFlag，client.lua 的 OnComponentPropertiesChanged 把订阅落到 mdb 总线的 on_properties_changed，回调在 drive_collection.lua:init() 注册。storage 收到 ReplaceFlag==1 后，按信号 path 反查 Component 对象取出 fru_name、定位对应的 drive，然后把该硬盘的 CommandTimeoutTimes 和 UnexpectedSenseTimes 错误计数清零，相当于换盘后让新盘从干净状态被重新监控识别，避免沿用旧盘累计的超时/异常 sense 计数。所以「换了硬盘没识别/状态没刷新」的根因要顺着 frudata 写 ReplaceFlag → mdb bmc.kepler.Systems.Component → storage 清错误计数这条链路排查，若 storage 反查不到 component 对象（path/Name 不匹配）就会打 'not found component object' 而不清计数。",
+      "dependency_edge": "storage --订阅 bmc.kepler.Systems.Component.{ReplaceFlag}--> frudata"
+    },
+    "metadata": {
+      "category": "cross-component-flow",
+      "difficulty": "medium",
+      "expected_max_iterations": 6,
+      "case_id": "xc-storage-frudata-replaceflag",
+      "flow_chain": ["frudata", "mdb:bmc.kepler.Systems.Component", "storage"],
+      "interface": "bmc.kepler.Systems.Component",
+      "properties": ["ReplaceFlag"],
+      "log_evidence": [
+        {"log": "BoardSerialNumber changed from %s to %s", "at": "sn_replace.lua:62"},
+        {"log": "not found component object, drive name:%s signal path:%s", "at": "drive_collection.lua:165"}
+      ]
+    }
+  },
+  {
+    "input": {
+      "questions": [
+        "storage 读 PcieAddrInfo 是从哪个组件拿的？",
+        "NVMe 盘的 ResouceId（挂在哪个 CPU socket）是怎么算出来的，storage 为什么要去读 PcieAddrInfo 对象、字段来自哪个组件？",
+        "我这块 NVMe 硬盘上报的 CPU/Socket 归属一直不对，是不是 storage 没读到 pcie_device 的 PCIe 地址信息？该从哪个函数查起？",
+        "日志里 storage 报 'get PcieAddrInfo list failed' 和 'update ResourceId failed!'，这两条是哪个组件、读谁的对象失败导致的？"
+      ],
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 1
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "PcieAddrInfo",
+        "get_sub_objects",
+        "update_res_id",
+        "ResouceId",
+        "refInterface",
+        "pcie_device",
+        "storage",
+        "nvme_object"
+      ],
+      "expected_components": ["storage", "pcie_device"],
+      "expected_citations": [
+        "model.json:494",
+        "pcie_addr_info.lua:18",
+        "biz_topo_service.lua:190",
+        "nvme_object.lua:667",
+        "nvme_object.lua:683",
+        "service.json:118"
+      ],
+      "expected_tools": ["gather_code_context", "resolve_interface"],
+      "must_use_source": true,
+      "reference_answer": "接口 bmc.kepler.Systems.PcieAddrInfo 的 owner 是 pcie_device：它在 mds/model.json:489-494 用 interfaces 块定义并实现该对象（表 t_pcie_addr_info），并在 biz_topo_service.lua:190 和 class/pcie_addr_info.lua:18 实写 Bus/Device/VendorID 等字段。storage 是消费方：它在 model.json:1639 用 refInterface 引用该接口，真正读取发生在 nvme_object.lua:655-704 的 c_nvme:update_res_id，通过 mdb.get_sub_objects + mdb.get_object 主动拉取 pcie_device 的 PcieAddrInfo 对象列表，再按 SlotID/ComponentType 匹配取 SocketID 算出 NVMe 盘的 ResouceId（挂在哪个 CPU/Socket）。这是主动读取而非属性订阅——storage 的 service.json 对 PcieAddrInfo 的 properties 为空（无 subscribe），gen/client.lua 走的是 GetPcieAddrInfoObjects 这类读访问器。因此依赖边是 storage 读取 pcie_device 实现的 PcieAddrInfo。",
+      "dependency_edge": "storage --读取 bmc.kepler.Systems.PcieAddrInfo--> pcie_device"
+    },
+    "metadata": {
+      "category": "cross-component-flow",
+      "difficulty": "hard",
+      "expected_max_iterations": 6,
+      "case_id": "xc-storage-pcie-addrinfo",
+      "flow_chain": ["pcie_device", "mdb:bmc.kepler.Systems.PcieAddrInfo", "storage"],
+      "interface": "bmc.kepler.Systems.PcieAddrInfo",
+      "properties": ["SlotID", "ComponentType", "SocketID", "Bus", "Device", "Function"],
+      "mechanism": "active-read",
+      "note": "原假设方向相反(pcie 读 storage)，经 subagent 核对订正：owner 是 pcie_device，storage 主动读取该对象算 NVMe ResouceId。",
+      "log_evidence": [
+        {"log": "get PcieAddrInfo list failed", "at": "nvme_object.lua:669"},
+        {"log": "update ResourceId failed!", "at": "nvme_object.lua:699"}
+      ]
+    }
+  },
+  {
+    "input": {
+      "questions": [
+        "风扇板上线后热管理为什么没立刻接管调速？",
+        "我看 thermal_mgmt 订阅了 Systems.Board 和 Board.Unit，单板新增和 CurrentUpgradeStatus 变化分别由谁产生、thermal 收到后到底做了什么处理？",
+        "CPLD 升级的时候风扇转速好像卡住不动了，升级完才恢复，这是 thermal_mgmt 自己的 bug 还是别的组件发的信号导致的？",
+        "日志里出现 'update fan%d mcu_upgrading = true' 还有 'set upgarde flag to %s'，这俩是不是一条链上的？谁发谁收？"
+      ],
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 1
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "Systems.Board",
+        "Board.Unit",
+        "CurrentUpgradeStatus",
+        "OnBoardInterfacesAdded",
+        "OnUnitPropertiesChanged",
+        "set_upgarde_flag",
+        "thermal_mgmt",
+        "general_hardware"
+      ],
+      "expected_components": ["thermal_mgmt", "general_hardware"],
+      "expected_citations": [
+        "client.lua:255",
+        "thermal_mgmt_app.lua:206",
+        "fan_object.lua:856",
+        "pump_object.lua:207",
+        "model.json:1494",
+        "upgrade_service_comm.lua:352"
+      ],
+      "expected_tools": ["gather_code_context", "resolve_interface"],
+      "must_use_source": true,
+      "reference_answer": "这是一条 general_hardware 生产、thermal_mgmt 消费的 mdb 解耦链路，不是 thermal_mgmt 的 bug。生产方 general_hardware 在自己的 mds/model.json 中定义并实现 Boards 对象（如 FanBoard，路径 /bmc/kepler/Systems/${SystemId}/Boards/FanBoard/${Id}），对外暴露 bmc.kepler.Systems.Board 与 bmc.kepler.Systems.Board.Unit 接口，并在固件升级时通过 set_upgarde_flag→set_prop('CurrentUpgradeStatus') 把升级标志写入该 Unit 对象（unit.lua:368、upgrade_service_comm.lua:352）。thermal_mgmt 通过 OnBoardInterfacesAdded 订阅 bmc.kepler.Systems.Board：单板上线且 BoardType=='FanBoard' 时把它纳入热管理拓扑（thermal_mgmt_app.lua:206 调 collect_fan_board_objects/fan_board_listenning）。同时通过 OnUnitPropertiesChanged 订阅 bmc.kepler.Systems.Board.Unit 的 CurrentUpgradeStatus（client.lua:255）：当值非 0（MCU/CPLD 升级中）时把风扇/水泵置为 mcu_upgrading=true 暂停下发转速（升级期间 setPWM 不生效），值回 0 时再重新下发一遍 PWM（fan_object.lua:842-857、pump_object.lua:193-208）。需注意 pcie_device 也声明了 Board.Unit，但其对象路径不含 FanBoard 会被 thermal 过滤，且 CurrentUpgradeStatus 的写入实现只在 general_hardware，所以针对风扇板这条链路的主要生产方就是 general_hardware。",
+      "dependency_edge": "thermal_mgmt --订阅 bmc.kepler.Systems.Board / Board.Unit.{CurrentUpgradeStatus}--> general_hardware"
+    },
+    "metadata": {
+      "category": "cross-component-flow",
+      "difficulty": "hard",
+      "expected_max_iterations": 6,
+      "case_id": "xc-thermal-genhw-board",
+      "flow_chain": ["general_hardware", "mdb:bmc.kepler.Systems.Board", "thermal_mgmt"],
+      "interface": "bmc.kepler.Systems.Board",
+      "properties": ["CurrentUpgradeStatus", "Name", "SilkText", "BoardType"],
+      "log_evidence": [
+        {"log": "set upgarde flag to %s", "at": "upgrade_service_comm.lua:352"},
+        {"log": "[%s]update fan%d mcu_upgrading = %s", "at": "fan_object.lua:856"},
+        {"log": "update pump(%d) mcu_upgrading = %s", "at": "pump_object.lua:207"}
+      ]
+    }
+  },
+  {
+    "input": {
+      "questions": [
+        "PCIe 设备的告警/拓扑信息是怎么上报给故障诊断服务的？",
+        "我想搞清楚 pcie_device 组件在 OCP 卡热插或者带内 PCIe 拓扑变化时，是通过哪个服务、调哪个方法把数据送到 fault_diagnosis 的，帮我把调用链和涉及的源码位置都理一遍。",
+        "PCIe 卡插上去之后 fault_diagnosis 那边好像没收到，是不是哪个组件没把消息发过去？这条上报链路在代码里是怎么走的？",
+        "日志里看到 '[DeviceLoador] Supplement alarm database list, BDF = ...'，这行是谁打的？它打印之前往哪个服务发了什么请求？"
+      ],
+      "dataset_id": "eval_bmc_applog",
+      "user_id": 1
+    },
+    "expected_output": {
+      "root_cause_keywords": [
+        "fault_diagnosis",
+        "bmc.kepler.fault_diagnosis",
+        "pcie_device",
+        "Process",
+        "CmdInfo",
+        "Supplement alarm database",
+        "OCP",
+        "pcall"
+      ],
+      "expected_components": ["pcie_device", "fault_diagnosis"],
+      "expected_citations": [
+        "device_loader.lua:39",
+        "device_loader.lua:879",
+        "device_loader.lua:885",
+        "biz_topo_service.lua:41",
+        "biz_topo_service.lua:486",
+        "biz_topo_service.lua:534"
+      ],
+      "expected_tools": ["gather_code_context", "resolve_interface"],
+      "must_use_source": true,
+      "reference_answer": "上报方是 pcie_device 组件，而非 sensor（sensor 代码内不存在对 fault_diagnosis 的调用）。它在两类场景下经 mdb 服务方法调用把数据送往 fault_diagnosis：一是 device_loader.lua 中 OCP 卡从不在位变为在位且持久化 PCIe 拓扑数据发生变化时（persist_ocp_systems_pcie_topo_info，879-880 行），二是 biz_topo_service.lua 处理带内 PCIe 拓扑信息上报时（set_pcie_topo_info / set_multi_systems_pcie_topo_info，486、534 行）。调用统一形如 self.bus:pcall(FAULT_DIAGNOSIS_SERVICE, IPMI_SET_(MULTI_SYSTEM_)PCIE_ADDR_INFO, INTERFACE_CMD_INFO, 'Process', ...)，即对服务 bmc.kepler.fault_diagnosis 在接口 bmc.kepler.CmdInfo 上调用 Process 方法，把打包后的 IPMI 报文转交故障诊断侧处理，并带 3 次重试。服务名常量 FAULT_DIAGNOSIS_SERVICE 在 device_loader.lua:39 与 biz_topo_service.lua:41 各自以 const 定义。调用成功后 device_loader.lua:885 打印 '[DeviceLoador] Supplement alarm database list'，表示已向故障诊断补充该 PCIe 设备的告警数据库记录。fault_diagnosis 服务的实现（owner）不在本次 20 个组件的快照内，只能确认 pcie_device 侧的调用方代码。",
+      "dependency_edge": "pcie_device --调用 bmc.kepler.fault_diagnosis 的 CmdInfo.Process 方法--> fault_diagnosis(snapshot 外)"
+    },
+    "metadata": {
+      "category": "cross-component-flow",
+      "difficulty": "hard",
+      "expected_max_iterations": 6,
+      "case_id": "xc-pciedevice-faultdiag-event",
+      "flow_chain": ["pcie_device", "service:bmc.kepler.fault_diagnosis", "fault_diagnosis(snapshot 外)"],
+      "interface": "bmc.kepler.fault_diagnosis",
+      "mechanism": "service-call",
+      "owner_in_snapshot": false,
+      "note": "原假设调用方是 sensor，经 subagent 核对订正：真实调用方是 pcie_device；fault_diagnosis 实现不在快照内。",
+      "log_evidence": [
+        {"log": "[DeviceLoador] Supplement alarm database list, BDF = %s:%s.%s, vid = %s, did = %s", "at": "device_loader.lua:885"},
+        {"log": "[DeviceLoador] Process failed err info: %s, retry times = %s", "at": "device_loader.lua:882"}
+      ]
+    }
+  }
+]
