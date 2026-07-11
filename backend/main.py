@@ -106,6 +106,8 @@ agent = Agent(
     context_token_budget=config.context_token_budget,
     recent_tools_keep=config.recent_tools_keep,
     source_mode=config.agent_source_mode,
+    context_compaction=config.context_compaction,
+    compaction_preserve_recent=config.compaction_preserve_recent,
 ) if llm else None
 logger.info("Agent source mode: %s", config.agent_source_mode)
 

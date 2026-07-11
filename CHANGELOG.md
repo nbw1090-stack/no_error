@@ -8,6 +8,31 @@
 
 ---
 
+## 0.0.4 — 2026-07-12
+
+**claw-code 风格上下文压缩替换丢弃式省略**：修复 v0.0.3 定位的前缀缓存命中率问题
+（direct 主 Agent 仅 20%——旧省略机制每轮改写历史前缀）。@40 压力实测：命中率
+50%→**76%**、总 token -34%，触发节奏约 5-6 轮一次；可解 case 质量满分（elide 下
+全 0 + DSML 泄漏）。详见 `result/v0.0.4.md`。
+
+- 新增 `agent/compaction.py`：**确定性模板摘要**（七段式：Scope/工具/最近请求/
+  中英关键词待办/关键文件（含 `file:line`）/当前工作/时间线；纯函数不调 LLM，
+  零延迟零成本零幻觉）、边界安全分割（tool 消息绝不与其 assistant(tool_calls)
+  拆散）、二次压缩合并（Scope 累加、并集去重、超 4000 字符按 pending > current >
+  files > requests > timeline 优先级行级裁剪）。参照 claw-code 的
+  检测→摘要→压缩→恢复流水线。
+- `context.py` 新增 compact 模式（默认）：超 24k 预算才触发压缩，分割点与摘要
+  持久化在 `Session.compaction` 并在两次触发之间**冻结**——发给 LLM 的前缀逐
+  字节稳定（有专门测试断言）；`session.messages` 保持 append-only，前端历史
+  不受影响。旧省略机制保留为 `AGENT_CONTEXT_COMPACTION=elide` 回退路径。
+- **churn 修复**（首版实测暴露）：巨型工具结果卡在固定保留窗内导致轮轮重压
+  （命中率 13%）。重写分割点选择：**低水位跳变**（压到预算×60% 即停）+
+  **显著性护栏**（砍不掉 30% 尾部就冻结）+ 保留窗改「最少 4 条」语义
+  （`AGENT_COMPACTION_PRESERVE_RECENT=4`）。
+- 测试：新增 `tests/test_compaction.py` 31 条（含前缀逐字节冻结、边界回退、
+  merge 裁剪优先级、Session 兼容、Agent 集成），全套 377 通过。
+- CLAUDE.md 同步 context 管理机制与新环境变量说明。
+
 ## 0.0.3 — 2026-07-11
 
 **多 Agent 架构落地**：主 Agent + 检索子 Agent（代码 + wiki 统一取证入口），与单

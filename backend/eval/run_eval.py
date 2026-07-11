@@ -308,6 +308,10 @@ def main(
         context_token_budget=config.context_token_budget,
         recent_tools_keep=config.recent_tools_keep,
         source_mode=arch,
+        # 上下文收缩策略跟随 AppConfig（AGENT_CONTEXT_COMPACTION 环境变量），
+        # 评测无需独立 CLI 参数——A/B 对照通过环境变量切换即可。
+        context_compaction=config.context_compaction,
+        compaction_preserve_recent=config.compaction_preserve_recent,
     )
     task = _make_task(agent, session_manager, config.data_dir, user_id)
 

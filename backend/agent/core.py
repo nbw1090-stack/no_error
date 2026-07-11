@@ -343,6 +343,8 @@ class Agent:
         context_token_budget: int = 24000,
         recent_tools_keep: int = 3,
         source_mode: str = "direct",
+        context_compaction: str = "compact",
+        compaction_preserve_recent: int = 4,
     ):
         self.llm = llm
         self.session_manager = session_manager
@@ -355,15 +357,50 @@ class Agent:
         self.source_mode = (
             source_mode if source_mode in ("direct", "subagent") else "direct"
         )
+        # 上下文收缩策略：compact = claw-code 风格压缩（默认，前缀缓存友好）；
+        # elide = 旧的陈旧工具结果省略（保留用于 A/B 对照与紧急回退）。
+        self.context_compaction = (
+            context_compaction
+            if context_compaction in ("compact", "elide")
+            else "compact"
+        )
+        self.compaction_preserve_recent = compaction_preserve_recent
 
     def _make_context(self, system_prompt: str) -> ConversationContext:
-        """构造对话上下文（统一注入 token 预算 / 工具结果省略策略）。"""
+        """构造对话上下文（统一注入 token 预算 / 上下文收缩策略）。"""
         return ConversationContext(
             system_prompt=system_prompt,
             max_history=self.max_history,
             token_budget=self.context_token_budget,
             recent_tools_keep=self.recent_tools_keep,
+            compaction_mode=self.context_compaction,
+            preserve_recent_messages=self.compaction_preserve_recent,
         )
+
+    def _build_llm_messages(
+        self, ctx: ConversationContext, session, session_id: str
+    ) -> list[dict]:
+        """
+        组装本轮发给 LLM 的消息（run / run_stream 共用）。
+
+        compact 模式：走压缩感知构建；触发新压缩时立刻把 compaction 状态
+        持久化回 session（messages 本身不动），下轮循环重新加载 session 即
+        读到冻结后的状态。elide 模式：保持旧行为完全不变。
+        """
+        if ctx.compaction_mode == "compact":
+            messages, new_compaction = ctx.build_messages_compacted(
+                session.messages, getattr(session, "compaction", None)
+            )
+            if new_compaction is not None:
+                self.session_manager.update_compaction(session_id, new_compaction)
+                logger.info(
+                    "Session %s compacted: upto=%d count=%d",
+                    session_id,
+                    new_compaction["upto"],
+                    new_compaction["count"],
+                )
+            return messages
+        return ctx.build_messages(history=session.messages)
 
     def _exposed_groups(
         self, dataset, source_components, wiki_available: bool
@@ -486,11 +523,12 @@ class Agent:
             # 收尾指令，强制 LLM 用已有信息直接作答。
             is_last = iteration == self.max_iterations - 1 or force_finalize
 
-            # 统一通过上下文构建器组装消息：system + 历史，并在超 token 预算时
-            # 省略陈旧工具结果（压制 ReAct 重发历史的二次方膨胀）。iteration 0 时
-            # session.messages 末尾即刚加入的用户消息，与旧的 [:-1]+user_message
-            # 等价，故两轮统一处理——关键是迭代 ≥1 也走省略，而非重发全量。
-            messages = ctx.build_messages(history=session.messages)
+            # 统一通过上下文构建器组装消息：system + 历史，超 token 预算时按
+            # 配置收缩——compact（默认）触发一次性压缩并冻结（前缀缓存友好），
+            # elide 回退到逐条省略陈旧工具结果。iteration 0 时 session.messages
+            # 末尾即刚加入的用户消息，与旧的 [:-1]+user_message 等价，故两轮
+            # 统一处理——关键是迭代 ≥1 也走收缩，而非重发全量。
+            messages = self._build_llm_messages(ctx, session, session_id)
             if is_last and exposed_groups:
                 messages.append(
                     {"role": "system", "content": _FINAL_STEP_DIRECTIVE}
@@ -738,11 +776,9 @@ class Agent:
             # 收尾指令，强制 LLM 用已有信息直接作答。
             is_last = iteration == self.max_iterations - 1 or force_finalize
 
-            # 统一通过上下文构建器组装消息：system + 历史，并在超 token 预算时
-            # 省略陈旧工具结果（压制 ReAct 重发历史的二次方膨胀）。iteration 0 时
-            # session.messages 末尾即刚加入的用户消息，与旧的 [:-1]+user_message
-            # 等价，故两轮统一处理——关键是迭代 ≥1 也走省略，而非重发全量。
-            messages = ctx.build_messages(history=session.messages)
+            # 统一通过上下文构建器组装消息（收缩策略同 run()，见上）：compact
+            # 触发一次性压缩并冻结前缀，elide 回退到逐条省略陈旧工具结果。
+            messages = self._build_llm_messages(ctx, session, session_id)
             if is_last and exposed_groups:
                 messages.append(
                     {"role": "system", "content": _FINAL_STEP_DIRECTIVE}

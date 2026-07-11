@@ -39,6 +39,12 @@ class Session:
     # 每轮对话的 Langfuse trace 元数据（独立于 messages，不进回放给 LLM 的历史）。
     # 用于本地对账：trace_id 在此但 Langfuse 搜不到 = 未上报（disabled 或丢失）。
     traces: list[dict] = field(default_factory=list)
+    # 上下文压缩状态（claw-code 风格 compaction，见 agent/compaction.py）：
+    # {"upto": int, "summary": str, "count": int} —— messages[:upto] 已被折叠为
+    # summary，发给 LLM 的历史 = [摘要消息] + messages[upto:]。默认 None 向后
+    # 兼容旧 session 文件（无此字段）。messages 本身**永远 append-only 不改写**
+    # （前端聊天记录展示依赖完整原文），压缩只改变"发给 LLM 看什么"。
+    compaction: Optional[dict] = None
     # 每条消息格式：{"role": "user"|"assistant"|"tool", "content": ...,
     #                "tool_calls": [...], "tool_call_id": ...}
 
@@ -173,6 +179,26 @@ class SessionManager:
         self._save(session)
         return session
 
+    def update_compaction(self, session_id: str, compaction: dict) -> Session:
+        """
+        更新会话的上下文压缩状态并持久化。
+
+        由 Agent 在 ConversationContext 触发新压缩后调用；messages 不受影响
+        （append-only），只更新 compaction 元数据。触发之间该状态冻结不变，
+        保证发给 LLM 的前缀逐字节稳定（前缀缓存命中的前提）。
+
+        Raises:
+            ValueError: 会话不存在（与 add_message 行为一致）
+        """
+        session = self.get(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+
+        session.compaction = compaction
+        session.updated_at = datetime.now(timezone.utc).isoformat()
+        self._save(session)
+        return session
+
     def record_trace(
         self, session_id: str, trace_id: str, name: str, user_id: int | None = None
     ) -> Session | None:
@@ -272,6 +298,7 @@ class SessionManager:
             "user_id": session.user_id,
             "username": session.username,
             "traces": session.traces,
+            "compaction": session.compaction,
         }
         with open(path, "w") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
