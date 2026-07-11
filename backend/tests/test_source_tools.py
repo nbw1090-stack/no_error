@@ -590,11 +590,13 @@ async def test_summarize_missing_user_id(summary_fake_clone, tmp_data):
 # ============================================================
 
 def test_tool_grouping_separates_log_and_source():
-    """源码工具标 group=source,日志工具默认 log,wiki 工具 group=wiki,三组互不重叠。"""
+    """源码工具标 group=source,日志工具默认 log,wiki 工具 group=wiki,取证工具
+    group=retrieval,四组互不重叠。"""
     source_schemas = ToolRegistry.get_schemas(groups={"source"})
     source_names = {s["function"]["name"] for s in source_schemas}
     log_names = set(ToolRegistry.get_names(groups={"log"}))
     wiki_names = set(ToolRegistry.get_names(groups={"wiki"}))
+    retrieval_names = set(ToolRegistry.get_names(groups={"retrieval"}))
     all_names = set(ToolRegistry.get_names())
 
     # 8 个源码工具（含多跳导航 trace_call_chain / 跨组件 resolve_interface）
@@ -610,8 +612,11 @@ def test_tool_grouping_separates_log_and_source():
     }
     # 3 个 wiki 工具（页导航 + 检索兜底）
     assert wiki_names == {"get_wiki_index", "read_wiki_page", "search_wiki"}
-    # 三组两两不重叠,并集 = 全部;groups=None 返回全部
+    # 1 个取证工具（多 Agent 架构下检索子 Agent 的统一入口）
+    assert retrieval_names == {"retrieve_evidence"}
+    # 四组两两不重叠,并集 = 全部;groups=None 返回全部
     assert source_names.isdisjoint(log_names)
     assert wiki_names.isdisjoint(source_names | log_names)
-    assert source_names | log_names | wiki_names == all_names
+    assert retrieval_names.isdisjoint(source_names | log_names | wiki_names)
+    assert source_names | log_names | wiki_names | retrieval_names == all_names
     assert len(ToolRegistry.get_schemas(groups=None)) == len(all_names)

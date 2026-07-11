@@ -8,6 +8,32 @@
 
 ---
 
+## 0.0.3 — 2026-07-11
+
+**多 Agent 架构落地**：主 Agent + 检索子 Agent（代码 + wiki 统一取证入口），与单
+Agent 架构同题对比评测——配对 12 条上质量指标全面提升（diagnosis_acc 0.58→0.92、
+rootcause_correctness 0.35→0.68、DSML 泄漏病态回复 5→0），主 Agent 上下文瘦身 8 倍
+（382k→48k 名义 token/case），代价是取证侧总 token ≈2.9×。详见 `result/v0.0.3.md`。
+
+- 新增 `agent/subagent.py`：**无状态**检索子 Agent（≤6 轮小 ReAct 循环，复用
+  ToolRegistry 的 source/wiki 工具组与 LoopGuard 熔断），查完即散，只带回
+  ≤2KB 摘要 + **真实到访**的出处（从工具结果提取 file:line / wiki slug，而非
+  LLM 自报），附轮次/空手而归健康统计。标准查法（代码先调用链骨架后函数体、
+  wiki 先目录后整页）写在提示词（`agent/prompts/retrieval.py`）而非代码——
+  评测不理想可原地换回两步管线实现，主 Agent 无感（取证契约不变）。
+- 新增 `retrieve_evidence` 工具（group="retrieval"，`agent/tools/retrieval_tool.py`），
+  启动时 `configure_retrieval(llm)` 装配；架构开关 `AGENT_SOURCE_MODE=direct|subagent`
+  （config/core/main 全链路，`SUBAGENT_MAX_ITERATIONS`/`SUBAGENT_SUMMARY_MAX_CHARS`
+  可调）。subagent 模式下主 Agent 只见 log 工具 + 取证工具（定位问题仍是主 Agent
+  自己查日志），system prompt 换用取证指导段、不走 Langfuse 托管 prompt。
+- 评测框架适配：`--arch`/`--user-id` CLI 开关；轨迹拉平子 Agent 内层工具调用
+  （source_tool_used / expected_tools_invoked 两架构可比）；新增 total_tokens
+  （主+子）、subagent_rounds、subagent_empty_handed 指标。
+- **修复历史评测失真 bug**：`run_eval` 构造 `LogDataset` 未注入 `user_id`，导致
+  v0.0.0/v0.0.1 评测中源码工具调用 100% 报「需登录」（xc-full：88/88 全错）——
+  旧基线根因类低分主要源于此，与本版数字不可直接纵向比较。
+- 测试：新增 15 条子 Agent/架构开关/评测适配用例，全套 346 通过。
+
 ## 0.0.2 — 2026-06-29
 
 新增 **跨组件流程评测 groundtruth 数据集** + 评测器对多组件/多问法的支持：把 openUBMC

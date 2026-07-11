@@ -283,7 +283,9 @@ def _prompt_vars(summary: dict, source_components) -> dict:
     }
 
 
-def _resolve_system_prompt(summary, source_components, wiki_available=False) -> str:
+def _resolve_system_prompt(
+    summary, source_components, wiki_available=False, source_mode="direct"
+) -> str:
     """
     解析 system prompt：数据分析模式（summary 非空）优先用 Langfuse 托管版本，
     拉取失败 / 非数据分析模式回退到本地 build_system_prompt。
@@ -293,9 +295,15 @@ def _resolve_system_prompt(summary, source_components, wiki_available=False) -> 
 
     wiki_available：全局 wiki 已建索引时，无论走本地还是 Langfuse 托管版本，
     都追加 wiki 检索指导段（托管 prompt 不含 wiki 段，故在外层补上）。
+
+    source_mode="subagent" 时直接走本地构建：Langfuse 托管 prompt 是为 direct
+    模式的工具集写的（指导直连源码/wiki 工具），与 retrieve_evidence 取证契约
+    不匹配，套用会误导主 Agent。
     """
-    if summary is None:
-        return build_system_prompt(None, source_components, wiki_available)
+    if summary is None or source_mode == "subagent":
+        return build_system_prompt(
+            summary, source_components, wiki_available, source_mode
+        )
 
     from config import AppConfig
 
@@ -334,6 +342,7 @@ class Agent:
         max_history: int = 40,
         context_token_budget: int = 24000,
         recent_tools_keep: int = 3,
+        source_mode: str = "direct",
     ):
         self.llm = llm
         self.session_manager = session_manager
@@ -341,6 +350,11 @@ class Agent:
         self.max_history = max_history
         self.context_token_budget = context_token_budget
         self.recent_tools_keep = recent_tools_keep
+        # 源码/wiki 取证方式：direct = 直连工具（单 Agent）；subagent = 只暴露
+        # retrieve_evidence，多轮检索隔离在子 Agent 内（多 Agent）。
+        self.source_mode = (
+            source_mode if source_mode in ("direct", "subagent") else "direct"
+        )
 
     def _make_context(self, system_prompt: str) -> ConversationContext:
         """构造对话上下文（统一注入 token 预算 / 工具结果省略策略）。"""
@@ -350,6 +364,29 @@ class Agent:
             token_budget=self.context_token_budget,
             recent_tools_keep=self.recent_tools_keep,
         )
+
+    def _exposed_groups(
+        self, dataset, source_components, wiki_available: bool
+    ) -> set[str]:
+        """
+        按取证方式决定暴露给主 Agent 的工具分组。
+
+        - direct：现状单 Agent —— log + source + wiki 全部直连。
+        - subagent：log 工具保持直连（定位问题是主 Agent 自己的本事）；
+          源码/wiki 只要有任一可用，就换成单一取证入口 retrieve_evidence。
+        """
+        groups: set[str] = set()
+        if dataset is not None:
+            groups.add("log")
+        if self.source_mode == "subagent":
+            if source_components or wiki_available:
+                groups.add("retrieval")
+            return groups
+        if source_components:
+            groups.add("source")
+        if wiki_available:
+            groups.add("wiki")
+        return groups
 
     async def run(
         self,
@@ -394,6 +431,7 @@ class Agent:
             dataset.summary if dataset is not None else None,
             source_components,
             wiki_available,
+            self.source_mode,
         )
         ctx = self._make_context(system_prompt)
 
@@ -403,14 +441,10 @@ class Agent:
         )
 
         # ---- 4. 获取工具 schema ----
-        # 日志工具需 dataset；源码工具仅需已索引组件（无日志也能用）。
-        exposed_groups: set[str] = set()
-        if dataset is not None:
-            exposed_groups.add("log")
-        if source_components:
-            exposed_groups.add("source")
-        if wiki_available:
-            exposed_groups.add("wiki")
+        # 日志工具需 dataset；源码/wiki（或 subagent 模式下的取证工具）按可用性暴露。
+        exposed_groups = self._exposed_groups(
+            dataset, source_components, wiki_available
+        )
         tool_schemas = (
             ToolRegistry.get_schemas(groups=exposed_groups) if exposed_groups else []
         )
@@ -649,6 +683,7 @@ class Agent:
             dataset.summary if dataset is not None else None,
             source_components,
             wiki_available,
+            self.source_mode,
         )
         ctx = self._make_context(system_prompt)
 
@@ -658,14 +693,10 @@ class Agent:
         )
 
         # ---- 4. 获取工具 schema ----
-        # 日志工具需 dataset；源码工具仅需已索引组件（无日志也能用）。
-        exposed_groups: set[str] = set()
-        if dataset is not None:
-            exposed_groups.add("log")
-        if source_components:
-            exposed_groups.add("source")
-        if wiki_available:
-            exposed_groups.add("wiki")
+        # 日志工具需 dataset；源码/wiki（或 subagent 模式下的取证工具）按可用性暴露。
+        exposed_groups = self._exposed_groups(
+            dataset, source_components, wiki_available
+        )
         tool_schemas = (
             ToolRegistry.get_schemas(groups=exposed_groups) if exposed_groups else []
         )

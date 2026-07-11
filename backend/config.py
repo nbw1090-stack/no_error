@@ -166,9 +166,18 @@ class AppConfig:
     context_token_budget: int = 24000
     # 省略时保留多少条**最近**的工具结果不动（保证当前推理链有完整证据）。
     recent_tools_keep: int = 3
+    # 源码/wiki 取证方式：direct = 主 Agent 直连 source/wiki 工具（单 Agent 现状）；
+    # subagent = 主 Agent 只见 log 工具 + retrieve_evidence，检索由子 Agent 承担。
+    agent_source_mode: str = "direct"
+    # 检索子 Agent 的轮次封顶 / 带回摘要的字符上限（≈2KB）。
+    subagent_max_iterations: int = 6
+    subagent_summary_max_chars: int = 2000
 
     @classmethod
     def from_env(cls) -> "AppConfig":
+        source_mode = os.getenv("AGENT_SOURCE_MODE", "direct").strip().lower()
+        if source_mode not in ("direct", "subagent"):
+            source_mode = "direct"
         return cls(
             llm=LLMConfig.from_env(),
             langfuse=LangfuseConfig.from_env(),
@@ -178,4 +187,11 @@ class AppConfig:
                 os.getenv("AGENT_CONTEXT_TOKEN_BUDGET", "24000")
             ),
             recent_tools_keep=int(os.getenv("AGENT_RECENT_TOOLS_KEEP", "3")),
+            agent_source_mode=source_mode,
+            subagent_max_iterations=int(
+                os.getenv("SUBAGENT_MAX_ITERATIONS", "6")
+            ),
+            subagent_summary_max_chars=int(
+                os.getenv("SUBAGENT_SUMMARY_MAX_CHARS", "2000")
+            ),
         )

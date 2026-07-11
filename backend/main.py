@@ -88,6 +88,16 @@ except Exception as e:
 
 session_manager = SessionManager(os.path.join(config.data_dir, "sessions"))
 
+# 检索子 Agent（AGENT_SOURCE_MODE=subagent 时 retrieve_evidence 工具的执行体）；
+# 无论当前模式如何都装配好，切换模式只需改环境变量重启，不涉及代码路径。
+from agent.tools.retrieval_tool import configure_retrieval  # noqa: E402
+
+configure_retrieval(
+    llm,
+    max_iterations=config.subagent_max_iterations,
+    summary_max_chars=config.subagent_summary_max_chars,
+)
+
 agent = Agent(
     llm=llm,
     session_manager=session_manager,
@@ -95,7 +105,9 @@ agent = Agent(
     max_history=config.max_history_messages,
     context_token_budget=config.context_token_budget,
     recent_tools_keep=config.recent_tools_keep,
+    source_mode=config.agent_source_mode,
 ) if llm else None
+logger.info("Agent source mode: %s", config.agent_source_mode)
 
 # ============================================================
 # 数据集存储目录

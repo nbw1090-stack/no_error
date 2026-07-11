@@ -248,6 +248,54 @@ def tool_call_count(*, input, output, expected_output, metadata=None, **kwargs):
     )
 
 
+def total_tokens(*, input, output, expected_output, metadata=None, **kwargs):
+    """
+    整条流水线 token 消耗（观测量）：主 Agent usage + 子 Agent usage。
+
+    两种架构公平对比的关键指标——subagent 模式把检索开销挪进了子 Agent，
+    只看主 Agent 的 usage 会漏算。task 未采集 usage 时降级跳过。
+    """
+    usage = output.get("usage") if isinstance(output, dict) else None
+    if not isinstance(usage, dict) or not usage.get("total"):
+        return Evaluation(name="total_tokens", value=None, comment="无 usage 记录")
+    total = (usage.get("total") or 0) + (_traj(output).get("sub_usage_total") or 0)
+    return Evaluation(
+        name="total_tokens",
+        value=float(total),
+        comment=f"主 {usage.get('total', 0)} + 子 {_traj(output).get('sub_usage_total') or 0}",
+    )
+
+
+def subagent_rounds(*, input, output, expected_output, metadata=None, **kwargs):
+    """子 Agent 平均每次取证用几轮（健康指标；无取证调用时不适用）。"""
+    traj = _traj(output)
+    calls = traj.get("sub_calls") or 0
+    if not calls:
+        return Evaluation(name="subagent_rounds", value=None, comment="无子 Agent 取证")
+    rounds = traj.get("sub_rounds") or 0
+    return Evaluation(
+        name="subagent_rounds",
+        value=rounds / calls,
+        comment=f"{calls} 次取证共 {rounds} 轮",
+    )
+
+
+def subagent_empty_handed(*, input, output, expected_output, metadata=None, **kwargs):
+    """子 Agent 空手而归率（健康指标；无取证调用时不适用）。"""
+    traj = _traj(output)
+    calls = traj.get("sub_calls") or 0
+    if not calls:
+        return Evaluation(
+            name="subagent_empty_handed", value=None, comment="无子 Agent 取证"
+        )
+    empty = traj.get("sub_empty_handed") or 0
+    return Evaluation(
+        name="subagent_empty_handed",
+        value=empty / calls,
+        comment=f"{calls} 次取证 {empty} 次空手而归",
+    )
+
+
 import functools
 
 
@@ -286,6 +334,9 @@ DETERMINISTIC_EVALUATORS = [
         iteration_efficiency,
         no_redundant_calls,
         tool_call_count,
+        total_tokens,
+        subagent_rounds,
+        subagent_empty_handed,
     )
 ]
 
