@@ -46,12 +46,20 @@ _DEFAULT_CASES = os.path.join(os.path.dirname(__file__), "datasets", "golden_cas
 _DEFAULT_USER_ID = 3
 
 
-def _load_dataset(dataset_id: str, data_dir: str) -> LogDataset:
-    """读取本地数据集 JSON 并构造 LogDataset（黄金集不校验归属）。"""
+def _load_dataset(dataset_id: str, data_dir: str, user_id: int | None) -> LogDataset:
+    """
+    读取本地数据集 JSON 并构造 LogDataset（黄金集不校验归属）。
+
+    user_id 必须注入（对齐 /api/chat 的构造方式）：源码/wiki 工具执行时读的是
+    dataset.user_id，不注入则所有源码工具调用都报「源码索引需登录后可用」——
+    历史评测（≤ v0.0.1）就踩了这个坑：源码工具 100% 报错，根因类指标失真。
+    """
     path = os.path.join(data_dir, "datasets", f"{dataset_id}.json")
     with open(path) as f:
         data = json.load(f)
-    return LogDataset(entries=data["entries"], summary=data["summary"])
+    return LogDataset(
+        entries=data["entries"], summary=data["summary"], user_id=user_id
+    )
 
 
 def _make_judge_llm(config: AppConfig):
@@ -68,31 +76,46 @@ def _make_judge_llm(config: AppConfig):
     return create_llm(judge_cfg)
 
 
-def _make_task(agent: Agent, session_manager: SessionManager, data_dir: str):
+def _make_task(
+    agent: Agent,
+    session_manager: SessionManager,
+    data_dir: str,
+    user_id_override: int | None = None,
+):
     """
-    构造 task 闭包：跑一条 case → {reply, trajectory}。
+    构造 task 闭包：跑一条 case → {reply, trajectory, usage}。
 
     关键修复：临时 session 用 input.user_id（默认 3）创建，否则
     core._load_source_components 拿不到已索引组件、源码工具永不暴露，
-    诊断链路退化成纯日志问答。
+    诊断链路退化成纯日志问答。user_id_override（--user-id）优先于用例值——
+    源码索引重建到了别的账号名下时，无需改用例文件即可跑通。
+
+    usage 由 agent.run 累加（主 Agent 的 token）；子 Agent 的 token 在
+    trajectory.sub_usage_total 里，total_tokens 指标把两者相加。
     """
 
     def task(*, item, **kwargs):
         inp = item.input  # {"question", "dataset_id", "user_id"?}
-        dataset = _load_dataset(inp["dataset_id"], data_dir)
-        uid = inp.get("user_id", _DEFAULT_USER_ID)
+        uid = (
+            user_id_override
+            if user_id_override is not None
+            else inp.get("user_id", _DEFAULT_USER_ID)
+        )
+        dataset = _load_dataset(inp["dataset_id"], data_dir, uid)
         session = session_manager.create(
             dataset_id=inp["dataset_id"], user_id=uid, username="eval"
         )
+        usage: dict = {}
         reply = run_coro_blocking(
             agent.run(
                 session_id=session.session_id,
                 user_message=inp["question"],
                 dataset=dataset,
+                usage=usage,
             )
         )
         trajectory = extract_trajectory(session_manager, session.session_id)
-        return {"reply": reply, "trajectory": trajectory}
+        return {"reply": reply, "trajectory": trajectory, "usage": usage}
 
     return task
 
@@ -250,7 +273,14 @@ def _run_online(task, evaluators, dataset_name: str, run_name: str) -> None:
         langfuse.shutdown()
 
 
-def main(dataset_name: str, run_name: str, offline: bool, cases_path: str) -> None:
+def main(
+    dataset_name: str,
+    run_name: str,
+    offline: bool,
+    cases_path: str,
+    arch: str = "direct",
+    user_id: int | None = None,
+) -> None:
     config = AppConfig.from_env()
     init_observability(config.langfuse)
 
@@ -258,14 +288,32 @@ def main(dataset_name: str, run_name: str, offline: bool, cases_path: str) -> No
     if llm is None:
         raise SystemExit("LLM 未配置（LLM_API_KEY 缺失），agent 无法产出回复，评测中止")
 
+    # 架构开关（--arch 优先于 AGENT_SOURCE_MODE 环境变量）：subagent 模式需要
+    # 装配检索子 Agent；direct 模式装配与否无影响（retrieval 组不会被暴露）。
+    from agent.tools.retrieval_tool import configure_retrieval
+
+    configure_retrieval(
+        llm,
+        max_iterations=config.subagent_max_iterations,
+        summary_max_chars=config.subagent_summary_max_chars,
+    )
+    logger.info("评测架构：source_mode=%s", arch)
+
     session_manager = SessionManager(os.path.join(config.data_dir, "sessions"))
     agent = Agent(
         llm=llm,
         session_manager=session_manager,
         max_iterations=config.max_tool_iterations,
         max_history=config.max_history_messages,
+        context_token_budget=config.context_token_budget,
+        recent_tools_keep=config.recent_tools_keep,
+        source_mode=arch,
+        # 上下文收缩策略跟随 AppConfig（AGENT_CONTEXT_COMPACTION 环境变量），
+        # 评测无需独立 CLI 参数——A/B 对照通过环境变量切换即可。
+        context_compaction=config.context_compaction,
+        compaction_preserve_recent=config.compaction_preserve_recent,
     )
-    task = _make_task(agent, session_manager, config.data_dir)
+    task = _make_task(agent, session_manager, config.data_dir, user_id)
 
     judge_llm = _make_judge_llm(config)
     if judge_llm is None:
@@ -289,9 +337,21 @@ if __name__ == "__main__":
     parser.add_argument("--run-name", default="eval", help="本次实验 run 名称")
     parser.add_argument("--offline", action="store_true", help="强制离线：读本地 golden_cases.json，出本地记分卡")
     parser.add_argument("--cases", default=_DEFAULT_CASES, help="本地用例 JSON 路径（离线模式）")
+    parser.add_argument(
+        "--arch",
+        choices=["direct", "subagent"],
+        default=os.getenv("AGENT_SOURCE_MODE", "direct"),
+        help="取证架构：direct=单 Agent 直连源码/wiki 工具；subagent=检索子 Agent 取证",
+    )
+    parser.add_argument(
+        "--user-id",
+        type=int,
+        default=None,
+        help="覆盖用例里的 user_id（源码索引挂在别的账号名下时用，如 --user-id 1）",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     )
-    main(args.dataset, args.run_name, args.offline, args.cases)
+    main(args.dataset, args.run_name, args.offline, args.cases, args.arch, args.user_id)

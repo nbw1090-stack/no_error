@@ -7,3 +7,4 @@
 from agent.tools.log_tools import *  # noqa: F401, F403
 from agent.tools.source_tools import *  # noqa: F401, F403
 from agent.tools.wiki_tools import *  # noqa: F401, F403
+from agent.tools.retrieval_tool import *  # noqa: F401, F403

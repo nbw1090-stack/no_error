@@ -8,6 +8,72 @@
 
 ---
 
+## 0.0.6 — 2026-07-12
+
+**结果文档整理（无代码变更）**：`result/v0.0.4.md` 的 2-case 实测改为
+「direct@10 / direct@40 / direct@40+compact / subagent」四配置单张总表
+（轮次、工具调用、质量三指标、DSML、token、缓存命中率逐项对齐），附读表要点。
+
+## 0.0.5 — 2026-07-12
+
+**全量评测归档（无代码变更）**：43 条黄金用例补全 v0.0.3 因余额中断的双架构对比
+（两架构均跑在 v0.0.4 压缩机制上）。27 条配对：多 Agent 质量结论全部复现
+（diagnosis 0.81→0.96、citation 0.48→0.81、DSML 泄漏 9→0，成本 3.1×）；
+压缩效应 28 条同题验证：faithfulness 0.47→0.63、token -10%、direct 主 Agent
+缓存命中率 20%→38%；子 Agent 轮次 5.57 贴顶黄灯持续。详见 `result/v0.0.4.md`
+追加章节。subagent 侧 16 条因余额再次耗尽未完成，可续跑补齐。
+
+## 0.0.4 — 2026-07-12
+
+**claw-code 风格上下文压缩替换丢弃式省略**：修复 v0.0.3 定位的前缀缓存命中率问题
+（direct 主 Agent 仅 20%——旧省略机制每轮改写历史前缀）。@40 压力实测：命中率
+50%→**76%**、总 token -34%，触发节奏约 5-6 轮一次；可解 case 质量满分（elide 下
+全 0 + DSML 泄漏）。详见 `result/v0.0.4.md`。
+
+- 新增 `agent/compaction.py`：**确定性模板摘要**（七段式：Scope/工具/最近请求/
+  中英关键词待办/关键文件（含 `file:line`）/当前工作/时间线；纯函数不调 LLM，
+  零延迟零成本零幻觉）、边界安全分割（tool 消息绝不与其 assistant(tool_calls)
+  拆散）、二次压缩合并（Scope 累加、并集去重、超 4000 字符按 pending > current >
+  files > requests > timeline 优先级行级裁剪）。参照 claw-code 的
+  检测→摘要→压缩→恢复流水线。
+- `context.py` 新增 compact 模式（默认）：超 24k 预算才触发压缩，分割点与摘要
+  持久化在 `Session.compaction` 并在两次触发之间**冻结**——发给 LLM 的前缀逐
+  字节稳定（有专门测试断言）；`session.messages` 保持 append-only，前端历史
+  不受影响。旧省略机制保留为 `AGENT_CONTEXT_COMPACTION=elide` 回退路径。
+- **churn 修复**（首版实测暴露）：巨型工具结果卡在固定保留窗内导致轮轮重压
+  （命中率 13%）。重写分割点选择：**低水位跳变**（压到预算×60% 即停）+
+  **显著性护栏**（砍不掉 30% 尾部就冻结）+ 保留窗改「最少 4 条」语义
+  （`AGENT_COMPACTION_PRESERVE_RECENT=4`）。
+- 测试：新增 `tests/test_compaction.py` 31 条（含前缀逐字节冻结、边界回退、
+  merge 裁剪优先级、Session 兼容、Agent 集成），全套 377 通过。
+- CLAUDE.md 同步 context 管理机制与新环境变量说明。
+
+## 0.0.3 — 2026-07-11
+
+**多 Agent 架构落地**：主 Agent + 检索子 Agent（代码 + wiki 统一取证入口），与单
+Agent 架构同题对比评测——配对 12 条上质量指标全面提升（diagnosis_acc 0.58→0.92、
+rootcause_correctness 0.35→0.68、DSML 泄漏病态回复 5→0），主 Agent 上下文瘦身 8 倍
+（382k→48k 名义 token/case），代价是取证侧总 token ≈2.9×。详见 `result/v0.0.3.md`。
+
+- 新增 `agent/subagent.py`：**无状态**检索子 Agent（≤6 轮小 ReAct 循环，复用
+  ToolRegistry 的 source/wiki 工具组与 LoopGuard 熔断），查完即散，只带回
+  ≤2KB 摘要 + **真实到访**的出处（从工具结果提取 file:line / wiki slug，而非
+  LLM 自报），附轮次/空手而归健康统计。标准查法（代码先调用链骨架后函数体、
+  wiki 先目录后整页）写在提示词（`agent/prompts/retrieval.py`）而非代码——
+  评测不理想可原地换回两步管线实现，主 Agent 无感（取证契约不变）。
+- 新增 `retrieve_evidence` 工具（group="retrieval"，`agent/tools/retrieval_tool.py`），
+  启动时 `configure_retrieval(llm)` 装配；架构开关 `AGENT_SOURCE_MODE=direct|subagent`
+  （config/core/main 全链路，`SUBAGENT_MAX_ITERATIONS`/`SUBAGENT_SUMMARY_MAX_CHARS`
+  可调）。subagent 模式下主 Agent 只见 log 工具 + 取证工具（定位问题仍是主 Agent
+  自己查日志），system prompt 换用取证指导段、不走 Langfuse 托管 prompt。
+- 评测框架适配：`--arch`/`--user-id` CLI 开关；轨迹拉平子 Agent 内层工具调用
+  （source_tool_used / expected_tools_invoked 两架构可比）；新增 total_tokens
+  （主+子）、subagent_rounds、subagent_empty_handed 指标。
+- **修复历史评测失真 bug**：`run_eval` 构造 `LogDataset` 未注入 `user_id`，导致
+  v0.0.0/v0.0.1 评测中源码工具调用 100% 报「需登录」（xc-full：88/88 全错）——
+  旧基线根因类低分主要源于此，与本版数字不可直接纵向比较。
+- 测试：新增 15 条子 Agent/架构开关/评测适配用例，全套 346 通过。
+
 ## 0.0.2 — 2026-06-29
 
 新增 **跨组件流程评测 groundtruth 数据集** + 评测器对多组件/多问法的支持：把 openUBMC

@@ -276,7 +276,8 @@ QA_SOURCE_ROLE_PROMPT = PromptTemplate(
 You are an expert BMC (Baseboard Management Controller) source analysis assistant.
 The user has NOT uploaded a log dataset in this session, so you CANNOT search or
 analyze actual logs. However, they have INDEXED SOURCE CODE for some components,
-and you DO have the source-analysis tools to read that real code.
+and this session DOES give you the means to consult that real code (see the
+tool guidance below).
 
 Always:
 - For ANY question about an indexed component — its purpose, structure,
@@ -310,10 +311,25 @@ def _format_indexed_components(source_components):
     return ", ".join(parts_str)
 
 
+def _retrieval_guidance(source_components, wiki_available: bool) -> str:
+    """渲染 subagent 模式下主 Agent 的取证工具指导段（替换源码/wiki 直连指导）。"""
+    from agent.prompts.retrieval import (
+        RETRIEVAL_TOOL_GUIDANCE_PROMPT,
+        render_sources_desc,
+    )
+
+    return RETRIEVAL_TOOL_GUIDANCE_PROMPT.render(
+        sources_desc=render_sources_desc(
+            source_components, wiki_available, _format_indexed_components
+        )
+    )
+
+
 def build_system_prompt(
     summary: Optional[dict] = None,
     source_components: list[dict] | list[str] | None = None,
     wiki_available: bool = False,
+    source_mode: str = "direct",
 ) -> str:
     """
     组合所有提示词模块，生成完整的系统提示词。
@@ -324,27 +340,36 @@ def build_system_prompt(
             检索指导段，引导 LLM 在代码问题上主动调用源码工具。
         wiki_available: 全局 wiki 知识库是否已建索引；为 True 时追加 wiki 检索
             指导段，引导 LLM 在架构/设计/接口类问题上主动调用 search_wiki。
+        source_mode: "direct"（主 Agent 直连源码/wiki 工具，现状单 Agent）或
+            "subagent"（源码/wiki 指导段替换为 retrieve_evidence 取证工具指导）。
 
     Returns:
         完整的系统提示词字符串
     """
+    use_subagent = source_mode == "subagent" and (
+        source_components or wiki_available
+    )
+
     # 无数据集：
     # - 有已索引源码组件 → 「无日志但有源码」模式（源码工具可用，可基于源码问答）
     # - 否则 → 纯通用问答（无日志/源码工具；若 wiki 可用则有 wiki 工具）
     if summary is None:
         if source_components:
-            parts = [
-                QA_SOURCE_ROLE_PROMPT.render(),
-                SOURCE_GUIDANCE_PROMPT.render(
-                    indexed_components=_format_indexed_components(
-                        source_components
+            parts = [QA_SOURCE_ROLE_PROMPT.render()]
+            if not use_subagent:
+                parts.append(
+                    SOURCE_GUIDANCE_PROMPT.render(
+                        indexed_components=_format_indexed_components(
+                            source_components
+                        )
                     )
-                ),
-            ]
+                )
         else:
             parts = [QA_ROLE_PROMPT.render(), QA_GUIDANCE_PROMPT.render()]
-        if wiki_available:
+        if wiki_available and not use_subagent:
             parts.append(WIKI_GUIDANCE_PROMPT.render())
+        if use_subagent:
+            parts.append(_retrieval_guidance(source_components, wiki_available))
         if source_components:
             parts.append(STOP_CRITERIA_PROMPT.render())
         return "\n\n".join(parts)
@@ -368,6 +393,10 @@ def build_system_prompt(
         TOOL_GUIDANCE_PROMPT.render(),
         STOP_CRITERIA_PROMPT.render(),
     ]
+
+    if use_subagent:
+        parts.append(_retrieval_guidance(source_components, wiki_available))
+        return "\n\n".join(parts)
 
     if source_components:
         parts.append(
